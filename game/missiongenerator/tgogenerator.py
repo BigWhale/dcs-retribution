@@ -1516,6 +1516,7 @@ class PortableTacanGenerator:
             tacan_callsign=callsign,
             ils=runway_data.ils,
             icls=runway_data.icls,
+            airbase_id=runway_data.airbase_id,
         )
 
         logging.info(

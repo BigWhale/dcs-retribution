@@ -20,6 +20,9 @@ from game.theater.iadsnetwork.iadsrole import IadsRole
 from game.utils import escape_string_for_lua
 from .missiondata import MissionData
 
+#: DCS Companion's silent sound file, sent with each radio subtitle.
+COMPANION_SILENCE = Path("./resources/dcs-companion/dcs-companion-silence.ogg")
+
 if TYPE_CHECKING:
     from game import Game
 
@@ -291,9 +294,26 @@ class LuaGenerator:
                 "engagementRangeMeters", str(escort.engagement_range_meters)
             )
 
+        script = lua_data.create_operations_lua()
+        if (companion := self.mission_data.companion) is not None:
+            script += "\n" + companion.lua(self.inject_companion_subtitle())
+
         trigger = TriggerStart(comment="Set DCS Retribution data")
-        trigger.add_action(DoScript(String(lua_data.create_operations_lua())))
+        trigger.add_action(DoScript(String(script)))
         self.mission.triggerrules.triggers.append(trigger)
+
+    def inject_companion_subtitle(self) -> Optional[str]:
+        """Adds DCS Companion's silent sound file with "DCS Radio subtitles" on.
+
+        The mission's path of the file, or None with the setting off.
+        """
+        if not self.game.settings.dcs_companion_subtitles:
+            return None
+        if not COMPANION_SILENCE.exists():
+            logging.error(f"Cannot find {COMPANION_SILENCE} for DCS Companion")
+            return None
+        self.mission.map_resource.add_resource_file(COMPANION_SILENCE.resolve())
+        return f"l10n/DEFAULT/{COMPANION_SILENCE.name}"
 
     def inject_lua_trigger(self, contents: str, comment: str) -> None:
         trigger = TriggerStart(comment=comment)

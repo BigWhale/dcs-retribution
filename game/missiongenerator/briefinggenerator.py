@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Dict, List, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from dcs.mission import Mission
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -22,6 +22,7 @@ from .missiondata import AwacsInfo, TankerInfo
 
 if TYPE_CHECKING:
     from game import Game
+    from game.radio.companion import CompanionPlan
 
 
 @dataclass
@@ -63,6 +64,8 @@ class MissionInfoGenerator:
         self.tankers: List[TankerInfo] = []
         self.frontlines: List[FrontLineInfo] = []
         self.dynamic_runways: List[RunwayData] = []
+        #: DCS Companion's frequencies, with the setting on.
+        self.companion: Optional[CompanionPlan[Any]] = None
 
     def add_awacs(self, awacs: AwacsInfo) -> None:
         """Adds an AWACS/GCI to the mission.

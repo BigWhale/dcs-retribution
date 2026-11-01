@@ -11,6 +11,9 @@ from typing import Dict, FrozenSet, Iterator, List, Set, Tuple
 
 from dcs.task import Modulation
 
+#: DCS Companion's frequencies keep this far from every other one.
+COMPANION_CLEARANCE_HZ = 25_000
+
 
 @dataclass(frozen=True)
 class RadioFrequency:
@@ -433,6 +436,9 @@ class RadioRegistry:
 
     def __init__(self) -> None:
         self.allocated_channels: Set[RadioFrequency] = set()
+        #: DCS Companion's frequencies, in hertz; nothing is allocated within
+        #: 25 kHz of them.
+        self.companion_hertz: List[int] = []
         self.radio_allocators: Dict[Radio, Iterator[RadioFrequency]] = {}
 
         radios = itertools.chain(RADIOS, [self.BLUFOR_UHF])
@@ -454,7 +460,7 @@ class RadioRegistry:
         """
         try:
             while_count = 0
-            while (channel := random_frequency(radio)) in self.allocated_channels:
+            while self._taken(channel := random_frequency(radio)):
                 while_count += 1
                 if while_count > 1000:
                     raise StopIteration
@@ -470,6 +476,12 @@ class RadioRegistry:
                 f"No more free channels for {radio.name}. Reusing {channel}."
             )
             return channel
+
+    def _taken(self, channel: RadioFrequency) -> bool:
+        return channel in self.allocated_channels or any(
+            abs(channel.hertz - hz) < COMPANION_CLEARANCE_HZ
+            for hz in self.companion_hertz
+        )
 
     def alloc_uhf(self) -> RadioFrequency:
         """Allocates a UHF radio channel suitable for inter-flight comms.
@@ -497,3 +509,8 @@ class RadioRegistry:
         if frequency in self.allocated_channels:
             raise ChannelInUseError(frequency)
         self.allocated_channels.add(frequency)
+
+    def reserve_companion(self, frequency: RadioFrequency) -> None:
+        """Reserves a DCS Companion frequency and the 25 kHz either side of it."""
+        self.reserve(frequency)
+        self.companion_hertz.append(frequency.hertz)

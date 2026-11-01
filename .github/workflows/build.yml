@@ -1,6 +1,9 @@
 name: Build
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [dcs-companion]
+  workflow_dispatch:
 
 jobs:
   lint:
@@ -39,25 +42,3 @@ jobs:
         with:
           name: dcs-retribution
           path: dist/dcs-retribution.zip
-
-      - name: Send status to Discord
-        uses: stegzilla/discord-notify@v2
-        with:
-          webhook_url: ${{ secrets.discord_webhook_betas }}
-          title: "Build #${{ github.run_number }} available!"
-          message: "**Branch:** ${{ github.ref_name }}\n**Download link:\n** https://github.com/dcs-retribution/dcs-retribution/actions/runs/${{ github.run_id }}"
-          include_image: true
-          avatar_url: https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png
-          username: GitHub Build Notifier
-        if: github.repository == 'dcs-retribution/dcs-retribution' && startsWith(github.ref_name, 'test')
-
-      - name: Send status to Discord
-        uses: stegzilla/discord-notify@v2
-        with:
-          webhook_url: ${{ secrets.discord_webhook_alphas }}
-          title: "Build #${{ github.run_number }} available!"
-          message: "**Branch:** ${{ github.ref_name }}\n**Download link:\n** https://github.com/dcs-retribution/dcs-retribution/actions/runs/${{ github.run_id }}"
-          include_image: true
-          avatar_url: https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png
-          username: GitHub Build Notifier
-        if: github.repository == 'dcs-retribution/dcs-retribution' && github.ref_name == 'dev'

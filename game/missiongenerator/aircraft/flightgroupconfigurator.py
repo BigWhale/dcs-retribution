@@ -286,6 +286,10 @@ class FlightGroupConfigurator:
     def register_air_support(self, channel: RadioFrequency) -> None:
         callsign = callsign_for_support_unit(self.group)
         if isinstance(self.flight.flight_plan, AewcFlightPlan):
+            companion = None
+            if (plan := self.mission_data.companion) is not None:
+                plan.name_awacs(self.flight, str(self.group.name))
+                companion = plan.awacs.get(self.flight)
             self.mission_data.awacs.append(
                 AwacsInfo(
                     group_name=str(self.group.name),
@@ -296,6 +300,7 @@ class FlightGroupConfigurator:
                     end_time=self.flight.flight_plan.patrol_end_time,
                     blue=self.flight.departure.captured,
                     unit=self.group.units[0],
+                    companion=companion,
                 )
             )
         elif (

@@ -30,6 +30,8 @@ class RunwayData:
     tacan_callsign: Optional[str] = None
     ils: Optional[RadioFrequency] = None
     icls: Optional[int] = None
+    #: The DCS airbase id of an airfield's runway; None for ships and FARPs.
+    airbase_id: Optional[int] = None
 
     @classmethod
     def for_pydcs_runway_runway(
@@ -76,6 +78,7 @@ class RunwayData:
             tacan=tacan,
             tacan_callsign=tacan_callsign,
             ils=ils,
+            airbase_id=airport.id,
         )
 
     @staticmethod

@@ -29,7 +29,7 @@ import textwrap
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, TYPE_CHECKING, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, TYPE_CHECKING, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 from dcs.mission import Mission
@@ -42,8 +42,10 @@ from game.ato.flightwaypoint import FlightWaypoint
 from game.ato.flightwaypointtype import FlightWaypointType
 from game.data.alic import AlicCodes
 from game.dcs.aircrafttype import AircraftType
+from game.radio.companion import CompanionPair, CompanionPlan
 from game.radio.radios import RadioFrequency
 from game.runways import RunwayData
+from game.runwaycourse import magnetic_course
 from game.theater import TheaterGroundObject, TheaterUnit
 from game.theater.bullseye import Bullseye
 from game.utils import Distance, UnitSystem, meters, mps, pounds
@@ -335,6 +337,33 @@ class FlightPlanBuilder:
         return self.rows
 
 
+def format_companion(
+    flight: FlightData,
+    pair: Optional[CompanionPair],
+    show: Callable[[RadioFrequency], str] = str,
+) -> str:
+    """A DCS Companion pair: the one in the presets with its channel, else both.
+
+    show writes a frequency: in full by default, the number alone on the
+    Mission Info page.
+    """
+    if pair is None:
+        return ""
+    for frequency in pair.frequencies():
+        if (channel := flight.channel_for(frequency)) is not None:
+            name = flight.aircraft_type.channel_name(channel.radio_id, channel.channel)
+            return f"{name}\n{show(frequency)}"
+    return "\n".join(show(f) for f in pair.frequencies())
+
+
+def frequency_number(frequency: RadioFrequency) -> str:
+    """A frequency without " MHz AM", as the Mission Info page writes them.
+
+    Any other unit or modulation is kept, as it tells the pilot something.
+    """
+    return str(frequency).removesuffix(" MHz AM")
+
+
 class BriefingPage(KneeboardPage):
     """A kneeboard page containing briefing information."""
 
@@ -345,8 +374,12 @@ class BriefingPage(KneeboardPage):
         weather: Weather,
         start_time: datetime.datetime,
         dark_kneeboard: bool,
+        companion_atis: Optional[Dict[int, CompanionPair]] = None,
+        course_for: Callable[[RunwayData], str] = lambda runway: "",
     ) -> None:
         self.flight = flight
+        self.companion_atis = companion_atis or {}
+        self.course_for = course_for
         self.bullseye = bullseye
         self.weather = weather
         self.start_time = start_time
@@ -369,11 +402,14 @@ class BriefingPage(KneeboardPage):
         writer.heading("Airfield Info")
         writer.table(
             [
-                self.airfield_info_row("Departure", self.flight.departure),
-                self.airfield_info_row("Arrival", self.flight.arrival),
-                self.airfield_info_row("Divert", self.flight.divert),
+                self.airfield_info_row("Dep", self.flight.departure),
+                self.airfield_info_row("Arr", self.flight.arrival),
+                self.airfield_info_row("Div", self.flight.divert),
             ],
-            headers=["", "Airbase", "ATC", "TCN", "I(C)LS", "RWY"],
+            headers=["", "Airbase", "ATC", "ATIS", "TCN", "I(C)LS", "RWY & CRS"],
+            # The flight plan's font, short titles and frequencies without
+            # their unit, so that the table fits the page's width.
+            font=self.flight_plan_font,
         )
 
         writer.heading(
@@ -497,15 +533,14 @@ class BriefingPage(KneeboardPage):
         """Creates a table row for a given airfield.
 
         Args:
-            row_title: Purpose of the airfield. e.g. "Departure", "Arrival" or
-                "Divert".
+            row_title: Purpose of the airfield. e.g. "Dep", "Arr" or "Div".
             runway: The runway described by this row.
 
         Returns:
             A list of strings to be used as a row of the airfield table.
         """
         if runway is None:
-            return [row_title, "", "", "", "", ""]
+            return [row_title, "", "", "", "", "", ""]
 
         atc = ""
         if runway.atc is not None:
@@ -515,29 +550,42 @@ class BriefingPage(KneeboardPage):
         else:
             tacan = str(runway.tacan)
         if runway.ils is not None:
-            ils = str(runway.ils)
+            ils = frequency_number(runway.ils)
         elif runway.icls is not None:
             ils = str(runway.icls)
         else:
             ils = ""
+        atis = ""
+        if runway.airbase_id is not None:
+            atis = format_companion(
+                self.flight,
+                self.companion_atis.get(runway.airbase_id),
+                frequency_number,
+            )
+        # The runway, then its magnetic course: "21L 206"; either alone when
+        # the other is not known.
+        runway_course = " ".join(
+            part for part in (runway.runway_name, self.course_for(runway)) if part
+        )
         return [
             row_title,
             "\n".join(textwrap.wrap(runway.airfield_name, width=17)),
             atc,
+            atis,
             tacan,
             ils,
-            runway.runway_name,
+            runway_course,
         ]
 
     def format_frequency(self, frequency: RadioFrequency) -> str:
         channel = self.flight.channel_for(frequency)
         if channel is None:
-            return str(frequency)
+            return frequency_number(frequency)
 
         channel_name = self.flight.aircraft_type.channel_name(
             channel.radio_id, channel.channel
         )
-        return f"{channel_name}\n{frequency}"
+        return f"{channel_name}\n{frequency_number(frequency)}"
 
 
 class SupportPage(KneeboardPage):
@@ -555,8 +603,10 @@ class SupportPage(KneeboardPage):
         jtacs: List[JtacInfo],
         start_time: datetime.datetime,
         dark_kneeboard: bool,
+        companion: Optional[CompanionPlan[Any]] = None,
     ) -> None:
         self.flight = flight
+        self.companion = companion
         self.package_flights = package_flights
         self.comms = list(comms)
         self.awacs = awacs
@@ -624,10 +674,14 @@ class SupportPage(KneeboardPage):
                     single_aewc.end_time - single_aewc.start_time
                 )
 
+            if self.companion is not None and single_aewc.companion is not None:
+                aewc_freq = format_companion(self.flight, single_aewc.companion)
+            else:
+                aewc_freq = self.format_frequency(single_aewc.freq)
             aewc_ladder.append(
                 [
                     str(single_aewc.callsign),
-                    self.format_frequency(single_aewc.freq),
+                    aewc_freq,
                     str(single_aewc.depature_location),
                     "TOT: " + tot + "\n" + "TOS: " + tos,
                 ]
@@ -637,6 +691,13 @@ class SupportPage(KneeboardPage):
             aewc_ladder,
             headers=["Callsign", "FREQ", "Departure", "TOT / TOS"],
         )
+
+        if self.companion is not None and self.companion.white_force is not None:
+            writer.heading("White Force")
+            writer.table(
+                [["White Force", self.format_frequency(self.companion.white_force)]],
+                headers=["Callsign", "FREQ"],
+            )
 
         comm_ladder = []
         writer.heading("Tankers")
@@ -883,6 +944,25 @@ class KneeboardGenerator(MissionInfoGenerator):
             )
         return all_flights
 
+    def crs_for(self, runway: RunwayData) -> str:
+        """The CRS column: the runway end's magnetic course, three digits."""
+        if runway.airbase_id is None:
+            return ""
+        terrain = self.game.theater.terrain
+        airport = terrain.airport_by_id(runway.airbase_id)
+        if airport is None:
+            return ""
+        position = airport.position.latlng()
+        course = magnetic_course(
+            terrain.name,
+            runway.airbase_id,
+            runway.runway_name,
+            position.lat,
+            position.lng,
+            self.game.conditions.start_time,
+        )
+        return "" if course is None else f"{course:03}"
+
     def generate_task_page(self, flight: FlightData) -> Optional[KneeboardPage]:
         if flight.flight_type in (FlightType.DEAD, FlightType.SEAD):
             return SeadTaskPage(flight, self.dark_kneeboard)
@@ -902,6 +982,9 @@ class KneeboardGenerator(MissionInfoGenerator):
         else:
             zoned_time = self.game.conditions.start_time
 
+        # DCS Companion's frequencies are blue's only.
+        companion = self.companion if flight.friendly.is_blue else None
+
         pages: List[KneeboardPage] = [
             BriefingPage(
                 flight,
@@ -909,6 +992,8 @@ class KneeboardGenerator(MissionInfoGenerator):
                 self.game.conditions.weather,
                 zoned_time,
                 self.dark_kneeboard,
+                companion_atis=companion.atis if companion is not None else None,
+                course_for=self.crs_for,
             ),
             SupportPage(
                 flight,
@@ -919,6 +1004,7 @@ class KneeboardGenerator(MissionInfoGenerator):
                 self.jtacs,
                 zoned_time,
                 self.dark_kneeboard,
+                companion=companion,
             ),
         ]
 

@@ -24,9 +24,11 @@ from game.missiongenerator.aircraft.aircraftgenerator import (
 from game.missiongenerator.countryassigner import CountryAssigner
 from game.naming import namegen
 from game.spatialindex import LiveUnitIndex
+from game.ato.flighttype import FlightType
+from game.radio.companion import plan_companion
 from game.radio.radios import RadioFrequency, RadioRegistry, MHz
 from game.radio.tacan import TacanRegistry
-from game.theater import Airfield
+from game.theater import Airfield, NavalControlPoint
 from game.theater.bullseye import Bullseye
 from game.unitmap import UnitMap
 from .briefinggenerator import BriefingGenerator, MissionInfoGenerator
@@ -215,6 +217,43 @@ class MissionGenerator:
         unique_map_frequencies.add(MHz(121, 500))
         for frequency in unique_map_frequencies:
             self.radio_registry.reserve(frequency)
+        if self.game.settings.dcs_companion:
+            self.plan_companion()
+
+    def plan_companion(self) -> None:
+        """Plans DCS Companion's frequencies before any random pick.
+
+        Busy are the frequencies reserved so far, every carrier's and LHA's
+        configured frequency, and every user-set package and flight frequency,
+        which are reserved only later.
+        """
+        busy = set(self.radio_registry.allocated_channels)
+        for cp in self.game.theater.controlpoints:
+            if isinstance(cp, NavalControlPoint) and cp.frequency is not None:
+                busy.add(cp.frequency)
+        for coalition in (self.game.blue, self.game.red):
+            for package in coalition.ato.packages:
+                if package.frequency is not None:
+                    busy.add(package.frequency)
+                for flight in package.flights:
+                    if flight.frequency is not None:
+                        busy.add(flight.frequency)
+
+        airfields = [
+            cp.airport.id
+            for cp in self.game.theater.controlpoints
+            if isinstance(cp, Airfield) and cp.captured.is_blue
+        ]
+        awacs = [
+            flight
+            for package in self.game.blue.ato.packages
+            for flight in package.flights
+            if flight.flight_type is FlightType.AEWC
+        ]
+        plan = plan_companion(busy, airfields, awacs)
+        for frequency in plan.frequencies():
+            self.radio_registry.reserve_companion(frequency)
+        self.mission_data.companion = plan
 
     def initialize_tacan_registry(
         self, unique_map_frequencies: set[RadioFrequency]
@@ -380,6 +419,7 @@ class MissionGenerator:
             BriefingGenerator(self.mission, self.game),
         ]
         for gen in gens:
+            gen.companion = mission_data.companion
             for dynamic_runway in mission_data.runways:
                 gen.add_dynamic_runway(dynamic_runway)
 

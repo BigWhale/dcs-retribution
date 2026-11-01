@@ -102,7 +102,7 @@ TACAN : {{ runway.tacan }} {{ runway.tacan_callsign }}
 {%- if awacs|length > 0 %}
 AWACS:
 ====================
-{% for i in awacs %}{{ i.callsign }} -- 频率 : {{i.freq.mhz}}
+{% for i in awacs %}{{ i.callsign }} -- 频率 : {{i.briefing_freq}}
 {% endfor %}
 {% endif %}
 

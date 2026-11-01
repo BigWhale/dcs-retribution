@@ -107,7 +107,7 @@ TACAN : {{ runway.tacan }} {{ runway.tacan_callsign }}
 {%- if awacs|length > 0 %}
 AWACS:
 ====================
-{% for i in awacs %}{{ i.callsign }} -- Freq : {{i.freq.mhz}}
+{% for i in awacs %}{{ i.callsign }} -- Freq : {{i.briefing_freq}}
 {% endfor %}
 
 {% endif %}

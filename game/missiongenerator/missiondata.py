@@ -13,6 +13,8 @@ from game.missiongenerator.aircraft.flightdata import FlightData
 from game.runways import RunwayData
 
 if TYPE_CHECKING:
+    from game.ato.flight import Flight
+    from game.radio.companion import CompanionPair, CompanionPlan
     from game.radio.radios import RadioFrequency
     from game.radio.tacan import TacanChannel
     from game.theater.player import Player
@@ -41,6 +43,15 @@ class AwacsInfo(GroupInfo):
     start_time: datetime
     end_time: datetime
     unit: FlyingUnit  # reference to be used as L16 donor
+    #: DCS Companion's VHF and UHF for this AWACS, with the setting on.
+    companion: Optional[CompanionPair] = None
+
+    @property
+    def briefing_freq(self) -> str:
+        """The frequency the briefing gives: ours with the setting on."""
+        if self.companion is not None:
+            return " / ".join(f"{f.mhz:.3f}" for f in self.companion.frequencies())
+        return str(self.freq.mhz)
 
 
 @dataclass
@@ -125,3 +136,5 @@ class MissionData:
     cp_stack: dict[UUID, Distance] = field(default_factory=dict)
     player_frontline_groups: list[FrontlineUnitGroupsInfo] = field(default_factory=list)
     enemy_frontline_groups: list[FrontlineUnitGroupsInfo] = field(default_factory=list)
+    #: DCS Companion's frequencies, with the "Using DCS Companion & SRS" setting on.
+    companion: Optional[CompanionPlan[Flight]] = None

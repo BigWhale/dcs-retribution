@@ -79,6 +79,8 @@ MISSION_GENERATOR_PAGE = "Mission Generator"
 
 GAMEPLAY_SECTION = "Gameplay"
 
+DCS_COMPANION_SECTION = "DCS Companion"
+
 # TODO: Make sections a type and add headers.
 # This section had the header: "Disabling settings below may improve performance, but
 # will impact the overall quality of the experience."
@@ -1200,6 +1202,29 @@ class Settings:
         MISSION_GENERATOR_PAGE,
         GAMEPLAY_SECTION,
         default=True,
+    )
+
+    # DCS Companion
+    dcs_companion: bool = boolean_option(
+        "Using DCS Companion & SRS",
+        page=MISSION_GENERATOR_PAGE,
+        section=DCS_COMPANION_SECTION,
+        default=False,
+        detail=(
+            "Plans the ATIS, White Force and AWACS frequencies of DCS Companion, "
+            "puts them in the player aircraft's presets and on the kneeboard."
+        ),
+    )
+    dcs_companion_subtitles: bool = boolean_option(
+        "DCS Radio subtitles",
+        page=MISSION_GENERATOR_PAGE,
+        section=DCS_COMPANION_SECTION,
+        default=False,
+        detail=(
+            "DCS Companion shows its airfield stations' replies as DCS radio "
+            "subtitles in place of on-screen text. Adds a silent sound file to "
+            'the mission for it. Needs "Using DCS Companion & SRS".'
+        ),
     )
 
     # Performance

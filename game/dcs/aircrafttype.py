@@ -220,6 +220,7 @@ class AircraftType(UnitType[Type[FlyingType]]):
     default_livery: Optional[str]
 
     intra_flight_radio: Optional[Radio]
+    inter_flight_radio: Optional[Radio]
     channel_allocator: Optional[RadioChannelAllocator]
     channel_namer: Type[ChannelNamer]
 
@@ -607,6 +608,7 @@ class AircraftType(UnitType[Type[FlyingType]]):
             fuel_consumption=fuel_consumption,
             default_livery=data.get("default_livery"),
             intra_flight_radio=radio_config.intra_flight,
+            inter_flight_radio=radio_config.inter_flight,
             channel_allocator=radio_config.channel_allocator,
             channel_namer=radio_config.channel_namer,
             kneeboard_units=units,

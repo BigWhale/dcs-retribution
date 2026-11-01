@@ -1,11 +1,27 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Iterable, Iterator, Optional, TYPE_CHECKING, TypeVar
+
+from game.radio.companion import CompanionPair
 
 if TYPE_CHECKING:
     from game.missiongenerator.aircraft.flightdata import FlightData
-    from game.missiongenerator.missiondata import MissionData
+    from game.missiongenerator.missiondata import GroupInfo, MissionData
+    from game.radio.companion import CompanionPlan
+    from game.radio.radios import RadioFrequency
+
+InfoT = TypeVar("InfoT", bound="GroupInfo")
+
+
+def own_side(infos: Iterable[InfoT], flight: FlightData) -> Iterator[InfoT]:
+    """The support groups (AWACS, tankers) of the flight's own side.
+
+    Mission data holds both coalitions' support; the other side's frequencies
+    do not belong in a flight's presets.
+    """
+    return (info for info in infos if info.blue == flight.friendly)
 
 
 class RadioChannelAllocator:
@@ -69,11 +85,16 @@ class CommonRadioChannelAllocator(RadioChannelAllocator):
         last_channel = flight.num_radio_channels(radio_id)
         channel_alloc = iter(range(first_channel, last_channel + 1))
 
+        companion = mission_data.companion
+        if companion is not None and flight.friendly.is_blue:
+            self.assign_with_companion(flight, mission_data, companion, channel_alloc)
+            return
+
         if flight.departure.atc is not None:
             flight.assign_channel(radio_id, next(channel_alloc), flight.departure.atc)
 
         # TODO: If there ever are multiple AWACS, limit to mission relevant.
-        for awacs in mission_data.awacs:
+        for awacs in own_side(mission_data.awacs, flight):
             flight.assign_channel(radio_id, next(channel_alloc), awacs.freq)
 
         for jtac in mission_data.jtacs:
@@ -87,7 +108,7 @@ class CommonRadioChannelAllocator(RadioChannelAllocator):
 
         try:
             # TODO: Skip incompatible tankers.
-            for tanker in mission_data.tankers:
+            for tanker in own_side(mission_data.tankers, flight):
                 flight.assign_channel(radio_id, next(channel_alloc), tanker.freq)
 
             if flight.divert is not None and flight.divert.atc is not None:
@@ -96,6 +117,75 @@ class CommonRadioChannelAllocator(RadioChannelAllocator):
             # Any remaining channels are nice-to-haves, but not necessary for
             # the few aircraft with a small number of channels available.
             pass
+
+    def assign_with_companion(
+        self,
+        flight: FlightData,
+        mission_data: MissionData,
+        companion: CompanionPlan[Any],
+        channels: Iterator[int],
+    ) -> None:
+        """Puts DCS Companion's frequencies among the inter-flight channels.
+
+        In order: departure ATC and ATIS, our AWACS in place of the AWACS
+        groups' own, JTACs, package, arrival ATC and ATIS, White Force,
+        tankers, divert ATC and ATIS. Ours take the band the radio tunes.
+        On a full radio the rest are left out and logged.
+        """
+        assert self.inter_flight_radio_index is not None
+        radio = flight.aircraft_type.inter_flight_radio
+        wanted: list[tuple[str, Optional[RadioFrequency]]] = []
+
+        def ours(name: str, pair: Optional[CompanionPair]) -> None:
+            if pair is None:
+                return
+            if (frequency := pair.on_radio(radio)) is None:
+                logging.info(
+                    f"{flight.callsign} ({flight.aircraft_type}): {radio} tunes "
+                    f"neither band of {name}, left out of the presets"
+                )
+            wanted.append((name, frequency))
+
+        def atis(name: str, airbase_id: Optional[int]) -> None:
+            if airbase_id is not None:
+                ours(f"{name} ATIS", companion.atis.get(airbase_id))
+
+        departure, arrival, divert = flight.departure, flight.arrival, flight.divert
+        wanted.append(("departure ATC", departure.atc))
+        atis("departure", departure.airbase_id)
+        for awacs in own_side(mission_data.awacs, flight):
+            if awacs.companion is not None:
+                ours(f"AWACS {awacs.callsign}", awacs.companion)
+            else:
+                wanted.append((f"AWACS {awacs.callsign}", awacs.freq))
+        for jtac in mission_data.jtacs:
+            wanted.append((f"JTAC {jtac.callsign}", jtac.freq))
+        wanted.append(("package", flight.package.frequency))
+        if arrival != departure:
+            wanted.append(("arrival ATC", arrival.atc))
+            if arrival.airbase_id != departure.airbase_id:
+                atis("arrival", arrival.airbase_id)
+        if companion.white_force is not None:
+            ours("White Force", CompanionPair(vhf=None, uhf=companion.white_force))
+        for tanker in own_side(mission_data.tankers, flight):
+            wanted.append((f"tanker {tanker.callsign}", tanker.freq))
+        if divert is not None:
+            wanted.append(("divert ATC", divert.atc))
+            if divert.airbase_id not in (departure.airbase_id, arrival.airbase_id):
+                atis("divert", divert.airbase_id)
+
+        wanted = [(name, freq) for name, freq in wanted if freq is not None]
+        for i, (name, freq) in enumerate(wanted):
+            channel = next(channels, None)
+            if channel is None:
+                left_out = ", ".join(name for name, _ in wanted[i:])
+                logging.warning(
+                    f"{flight.callsign} ({flight.aircraft_type}): no preset channel "
+                    f"left on radio {self.inter_flight_radio_index} for {left_out}"
+                )
+                return
+            assert freq is not None
+            flight.assign_channel(self.inter_flight_radio_index, channel, freq)
 
     @classmethod
     def from_cfg(cls, cfg: dict[str, Any]) -> CommonRadioChannelAllocator:
@@ -180,7 +270,7 @@ class ViggenRadioChannelAllocator(RadioChannelAllocator):
             radio_id, next(channel_alloc), flight.intra_flight_channel
         )
 
-        for awacs in mission_data.awacs:
+        for awacs in own_side(mission_data.awacs, flight):
             flight.assign_channel(radio_id, next(channel_alloc), awacs.freq)
 
         for jtac in mission_data.jtacs:
