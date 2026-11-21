@@ -215,8 +215,26 @@ class QTopPanel(QFrame):
             # Recreates the sim for the new turn, so it comes before generation.
             GameUpdateSignal.get_instance().updateGame(game)
             path = persistency.mission_path_for("retribution_dynamic.miz")
-            self.sim_controller.generate_miz(path)
-        logging.info("Dynamic campaign begun, mission written to %s", path)
+            try:
+                self.sim_controller.generate_miz(path)
+            except Exception as ex:
+                # The campaign is at turn 1 already and has no regenerate path,
+                # so say so instead of failing silently.
+                logging.exception("Dynamic campaign: writing %s failed", path)
+                QMessageBox.warning(
+                    self,
+                    "Starting mission not written",
+                    (
+                        f"The dynamic campaign has begun, but its starting mission "
+                        f"({path.name}) was not written:<br /><br />{ex}<br /><br />"
+                        "Regenerating it is not possible in this version. Restart "
+                        "Retribution and load the save, or start a new dynamic "
+                        "campaign."
+                    ),
+                    QMessageBox.StandardButton.Ok,
+                )
+            else:
+                logging.info("Dynamic campaign begun, mission written to %s", path)
         self.passTurnButton.setVisible(False)
         self.companion_link.start(game)
 

@@ -9,6 +9,8 @@ from dcs.terrain import PersianGulf
 
 from game.companionlink.snapshot import LiveSnapshot, LiveUnit
 from game.server.eventstream.eventstream import EventStream
+from game.server.eventstream import models as eventstream_models
+from game.server.eventstream.models import GameUpdateEventsJs
 from game.server.liveunits.models import LiveUnitJs
 from game.sim import GameUpdateEvents
 
@@ -46,6 +48,43 @@ def test_all_for_places_units_on_the_map() -> None:
         "Bob",
     )
     assert LiveUnitJs.all_for(None, theater) == []
+
+
+def test_a_snapshot_that_does_not_convert_is_skipped(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A fresh warn-once memory, so the warning shows whatever ran before.
+    monkeypatch.setattr(eventstream_models, "_warned_live_unit_errors", set())
+    terrain = PersianGulf()
+    centre = terrain.map_view_default.position
+    bad: Any = None  # a unit name the map model rejects
+    unit = LiveUnit(
+        name=bad,
+        group="Uzi 1",
+        category="plane",
+        type="F-16C_50",
+        side=2,
+        x=centre.x,
+        y=centre.y,
+        alt=3000.0,
+        heading=270.0,
+        speed=200.0,
+        in_air=True,
+        player="Bob",
+    )
+    snapshot = LiveSnapshot(
+        minute=12, boot="b", session=1, model_time=720.0, units=(unit,), size=0
+    )
+    game: Any = SimpleNamespace(
+        theater=SimpleNamespace(terrain=terrain), get_culling_zones=lambda: []
+    )
+    events = GameUpdateEvents().begin_new_turn().update_live_units(snapshot)
+
+    js = GameUpdateEventsJs.from_events(events, game)
+
+    assert js.live_units is None
+    assert js.new_turn is True
+    assert any("did not convert" in r.getMessage() for r in caplog.records)
 
 
 def test_put_nowait_from_another_thread_reaches_the_loop(

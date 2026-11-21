@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -21,6 +22,30 @@ from game.theater import Player
 if TYPE_CHECKING:
     from game import Game
     from game.sim import GameUpdateEvents
+
+
+# Kinds of live-units conversion failure already warned about; one warning each.
+_warned_live_unit_errors: set[str] = set()
+
+
+def _live_units_or_none(
+    events: GameUpdateEvents, game: Game
+) -> list[LiveUnitJs] | None:
+    """The live units on the map, or None when the snapshot does not convert.
+
+    One bad snapshot skips that minute; the rest of the event still goes out
+    and the event stream keeps running.
+    """
+    try:
+        return LiveUnitJs.all_for(events.live_units, game.theater)
+    except Exception as ex:
+        kind = type(ex).__name__
+        if kind not in _warned_live_unit_errors:
+            _warned_live_unit_errors.add(kind)
+            logging.warning(
+                "Live units: a snapshot did not convert (%s), skipping it", kind
+            )
+        return None
 
 
 class GameUpdateEventsJs(BaseModel):
@@ -91,7 +116,7 @@ class GameUpdateEventsJs(BaseModel):
                 for f in events.updated_front_lines
             ]
             if events.live_units is not None:
-                live_units = LiveUnitJs.all_for(events.live_units, game.theater)
+                live_units = _live_units_or_none(events, game)
 
         return GameUpdateEventsJs(
             updated_flight_positions={
