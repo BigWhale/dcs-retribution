@@ -56,6 +56,8 @@ class GeneratorOptions(QtWidgets.QWizardPage):
         self.registerField("no_enemy_navy", self.no_enemy_navy)
         self.squadrons_start_full = QtWidgets.QCheckBox()
         self.registerField("squadrons_start_full", self.squadrons_start_full)
+        self.dynamic_campaign = QtWidgets.QCheckBox()
+        self.registerField("dynamic_campaign", self.dynamic_campaign)
 
         generatorLayout = QtWidgets.QGridLayout()
         generatorLayout.addWidget(QtWidgets.QLabel("No Aircraft Carriers"), 1, 0)
@@ -75,15 +77,23 @@ class GeneratorOptions(QtWidgets.QWizardPage):
         )
         generatorLayout.addWidget(label, 5, 0)
         generatorLayout.addWidget(self.squadrons_start_full, 5, 1)
-        generatorLayout.addWidget(QtWidgets.QWidget(), 6, 0)
+
+        label = QtWidgets.QLabel("Use DCS Companion in Dynamic Campaign mode")
+        label.setToolTip(
+            "One DCS mission keeps running; Retribution follows it through the "
+            "DCS Companion. Cannot be changed after the campaign is created."
+        )
+        generatorLayout.addWidget(label, 6, 0)
+        generatorLayout.addWidget(self.dynamic_campaign, 6, 1)
+        generatorLayout.addWidget(QtWidgets.QWidget(), 7, 0)
 
         self.player_budget = BudgetInputs("Player starting budget", DEFAULT_BUDGET)
         self.registerField("starting_money", self.player_budget.starting_money)
-        generatorLayout.addLayout(self.player_budget, 7, 0)
+        generatorLayout.addLayout(self.player_budget, 8, 0)
 
         self.enemy_budget = BudgetInputs("Enemy starting budget", DEFAULT_BUDGET)
         self.registerField("enemy_starting_money", self.enemy_budget.starting_money)
-        generatorLayout.addLayout(self.enemy_budget, 8, 0)
+        generatorLayout.addLayout(self.enemy_budget, 9, 0)
 
         generatorSettingsGroup.setLayout(generatorLayout)
 

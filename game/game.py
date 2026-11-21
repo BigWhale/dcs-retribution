@@ -132,6 +132,9 @@ class Game:
         self.current_group_id = 0
         self.name_generator = naming.namegen
         self.laser_code_registry = LaserCodeRegistry()
+        # Set once by the new-game wizard; the campaign follows a running DCS
+        # mission through the DCS Companion. Never changed after creation.
+        self.dynamic_campaign = False
 
         self.db = GameDb()
 
@@ -183,6 +186,8 @@ class Game:
             self.laser_code_registry = LaserCodeRegistry()
             for front_line in self.theater.conflicts():
                 front_line.laser_code = self.laser_code_registry.alloc_laser_code()
+        if not hasattr(self, "dynamic_campaign"):
+            self.dynamic_campaign = False
         # Regenerate any state that was not persisted.
         self.on_load()
 

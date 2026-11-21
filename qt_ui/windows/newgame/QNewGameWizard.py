@@ -172,6 +172,9 @@ class NewGameWizard(QtWidgets.QWizard):
         if herc in g.blue.air_wing.squadrons or herc in g.red.air_wing.squadrons:
             g.settings.set_plugin_option("herculescargo", True)
 
+        # Before begin_turn_0: turn 0's planning must already see it.
+        self.generatedGame.dynamic_campaign = bool(self.field("dynamic_campaign"))
+
         self.generatedGame.begin_turn_0(
             squadrons_start_full=generator_settings.squadrons_start_full
         )
