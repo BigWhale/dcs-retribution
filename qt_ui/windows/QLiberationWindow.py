@@ -30,6 +30,7 @@ from game.server.dependencies import QtCallbacks, QtContext
 from game.theater import ControlPoint, MissionTarget, TheaterGroundObject
 from game.theater.controlpoint import motorpools_inside_capture_zone
 from qt_ui import liberation_install
+from qt_ui.companionlinkcontroller import CompanionLinkController
 from qt_ui.dialogs import Dialog
 from qt_ui.models import GameModel
 from qt_ui.simcontroller import SimController
@@ -85,6 +86,7 @@ class QLiberationWindow(QMainWindow):
             )
         )
         Dialog.set_game(self.game_model)
+        self.companion_link = CompanionLinkController(self)
         self.ato_panel = QAirTaskingOrderPanel(self.game_model)
         self.info_panel = QInfoPanel(self.game)
         self.liberation_map = QLiberationMap(
@@ -137,7 +139,9 @@ class QLiberationWindow(QMainWindow):
         hbox.setSizes([1, 10000000])
         vbox.setSizes([600, 100])
 
-        self.top_panel = QTopPanel(self.game_model, self.sim_controller, ui_flags)
+        self.top_panel = QTopPanel(
+            self.game_model, self.sim_controller, ui_flags, self.companion_link
+        )
         vbox = QVBoxLayout()
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.addWidget(self.top_panel)
@@ -497,6 +501,7 @@ class QLiberationWindow(QMainWindow):
             self.sim_controller.set_game(game)
             self.game_model.set(self.game)
             self.game_model.init_comms_registry()
+            self.companion_link.set_game(game)
         except AttributeError:
             logging.exception("Incompatible save game")
             QMessageBox.critical(
@@ -676,6 +681,7 @@ class QLiberationWindow(QMainWindow):
         if result in [QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No]:
             if result == QMessageBox.StandardButton.Yes:
                 self.saveGame()
+            self.companion_link.stop()
             self._save_window_geometry()
             super().closeEvent(event)
             self.dialog = None

@@ -57,6 +57,14 @@ class QLiberationPreferences(QFrame):
         self.port = liberation_install.server_port()
         self.port_input = QSpinBox()
 
+        self.companion_address = liberation_install.companion_address()
+        self.edit_companion_address = QLineEdit(self.companion_address)
+        self.edit_companion_address.setMinimumWidth(300)
+        self.companion_token = liberation_install.companion_token()
+        self.edit_companion_token = QLineEdit(self.companion_token)
+        self.edit_companion_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.edit_companion_token.setMinimumWidth(300)
+
         self.initUi()
 
     def initUi(self):
@@ -119,6 +127,25 @@ class QLiberationPreferences(QFrame):
         self.port_input.setValue(self.port)
         self.port_input.setStyleSheet("QSpinBox{ width: 50 }")
 
+        layout.addWidget(
+            QLabel("<strong>DCS Companion address</strong>"),
+            8,
+            0,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+        )
+        layout.addWidget(
+            self.edit_companion_address, 9, 0, alignment=Qt.AlignmentFlag.AlignRight
+        )
+        layout.addWidget(
+            QLabel("<strong>DCS Companion data token</strong>"),
+            10,
+            0,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+        )
+        layout.addWidget(
+            self.edit_companion_token, 11, 0, alignment=Qt.AlignmentFlag.AlignRight
+        )
+
         main_layout.addLayout(layout)
         main_layout.addStretch()
 
@@ -146,6 +173,8 @@ class QLiberationPreferences(QFrame):
         self.prefer_liberation_payloads = self.payloads_cb.isChecked()
         self.setup_preferences_on_every_start = self.setup_every_start_cb.isChecked()
         self.port = self.port_input.value()
+        self.companion_address = self.edit_companion_address.text().strip()
+        self.companion_token = self.edit_companion_token.text().strip()
         set_theme_index(self.themeSelect.currentIndex())
 
         if not os.path.isdir(self.saved_game_dir):
@@ -208,6 +237,7 @@ class QLiberationPreferences(QFrame):
             self.setup_preferences_on_every_start,
             self.port,
         )
+        liberation_install.setup_companion(self.companion_address, self.companion_token)
         liberation_install.save_config()
         liberation_theme.save_theme_config()
         return True

@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QMessageBox,
     QPushButton,
 )
@@ -19,6 +20,7 @@ from game.ato.traveltime import TotEstimator
 from game.profiling import logged_duration
 from game.settings.settings import FastForwardStopCondition
 from game.utils import meters
+from qt_ui.companionlinkcontroller import CompanionLinkController
 from qt_ui.models import GameModel
 from qt_ui.simcontroller import SimController
 from qt_ui.uiflags import UiFlags
@@ -36,11 +38,16 @@ from qt_ui.windows.QWaitingForMissionResultWindow import QWaitingForMissionResul
 
 class QTopPanel(QFrame):
     def __init__(
-        self, game_model: GameModel, sim_controller: SimController, ui_flags: UiFlags
+        self,
+        game_model: GameModel,
+        sim_controller: SimController,
+        ui_flags: UiFlags,
+        companion_link: CompanionLinkController,
     ) -> None:
         super(QTopPanel, self).__init__()
         self.game_model = game_model
         self.sim_controller = sim_controller
+        self.companion_link = companion_link
         self.dialog: Optional[QDialog] = None
 
         self.setMaximumHeight(70)
@@ -64,6 +71,13 @@ class QTopPanel(QFrame):
         self.proceedButton.clicked.connect(self.launch_mission)
         if not self.game or self.game.turn == 0:
             self.proceedButton.setEnabled(False)
+
+        # The link to DCS Companion, shown only while a dynamic campaign's link
+        # runs.
+        self.companion_status = QLabel()
+        self.companion_status.setVisible(False)
+        companion_link.status_changed.connect(self.update_companion_status)
+        companion_link.snapshot_received.connect(self.update_companion_status)
 
         self.factionsInfos = QFactionsInfos(self.game)
 
@@ -95,6 +109,7 @@ class QTopPanel(QFrame):
         self.proceedBoxLayout.addLayout(MaxPlayerCount(self.game_model.ato_model))
         self.proceedBoxLayout.addWidget(self.passTurnButton)
         self.proceedBoxLayout.addWidget(self.proceedButton)
+        self.proceedBoxLayout.addWidget(self.companion_status)
         self.proceedBox.setLayout(self.proceedBoxLayout)
 
         self.controls = [
@@ -165,6 +180,12 @@ class QTopPanel(QFrame):
         if self.show_sim_speed_controls:
             for button in self.simSpeedControls.buttons.values():
                 button.setVisible(not dynamic)
+        if not dynamic:
+            self.companion_status.setVisible(False)
+
+    def update_companion_status(self, _: object = None) -> None:
+        self.companion_status.setText(self.companion_link.status_text())
+        self.companion_status.setVisible(self.companion_link.active)
 
     def open_air_wing(self):
         self.dialog = AirWingDialog(self.game_model, self.window())
@@ -197,6 +218,7 @@ class QTopPanel(QFrame):
             self.sim_controller.generate_miz(path)
         logging.info("Dynamic campaign begun, mission written to %s", path)
         self.passTurnButton.setVisible(False)
+        self.companion_link.start(game)
 
     def negative_start_packages(self, now: datetime) -> List[Package]:
         packages = []

@@ -15,6 +15,11 @@ global __prefer_liberation_payloads
 global __setup_preferences_on_every_start
 global __server_port
 
+#: DCS Companion's campaign data port, as Retribution reaches it.
+DEFAULT_COMPANION_ADDRESS = "http://127.0.0.1:7791"
+__companion_address = DEFAULT_COMPANION_ADDRESS
+__companion_token = ""
+
 
 def _user_data_path() -> Path:
     if os.name == "nt":
@@ -42,6 +47,8 @@ def init():
     global __prefer_liberation_payloads
     global __setup_preferences_on_every_start
     global __server_port
+    global __companion_address
+    global __companion_token
 
     if PREFERENCES_PATH.exists():
         try:
@@ -61,6 +68,10 @@ def init():
                 "setup_preferences_on_every_start", False
             )
             __server_port = pref_data.get("server_port", 16880)
+            __companion_address = pref_data.get(
+                "companion_address", DEFAULT_COMPANION_ADDRESS
+            )
+            __companion_token = pref_data.get("companion_token", "")
             is_first_start = __setup_preferences_on_every_start
         except (KeyError, json.JSONDecodeError):
             __dcs_saved_game_directory = ""
@@ -70,6 +81,8 @@ def init():
             __prefer_liberation_payloads = False
             __setup_preferences_on_every_start = False
             __server_port = 16880
+            __companion_address = DEFAULT_COMPANION_ADDRESS
+            __companion_token = ""
             is_first_start = True
     else:
         __last_save_file = ""
@@ -119,6 +132,13 @@ def setup(
     persistency.setup(saved_game_dir, prefer_liberation_payloads, port)
 
 
+def setup_companion(address: str, token: str) -> None:
+    global __companion_address
+    global __companion_token
+    __companion_address = address
+    __companion_token = token
+
+
 def setup_last_save_file(last_save_file):
     global __last_save_file
     __last_save_file = last_save_file
@@ -130,6 +150,8 @@ def save_config():
     global __last_save_file
     global __ignore_empty_install_directory
     global __server_port
+    global __companion_address
+    global __companion_token
     pref_data = {
         "saved_game_dir": __dcs_saved_game_directory,
         "dcs_install_dir": __dcs_installation_directory,
@@ -138,6 +160,8 @@ def save_config():
         "prefer_liberation_payloads": __prefer_liberation_payloads,
         "setup_preferences_on_every_start": __setup_preferences_on_every_start,
         "server_port": __server_port,
+        "companion_address": __companion_address,
+        "companion_token": __companion_token,
     }
     PREFERENCES_PATH.parent.mkdir(exist_ok=True, parents=True)
     with PREFERENCES_PATH.open("w") as prefs:
@@ -167,6 +191,16 @@ def setup_preferences_on_every_start():
 def server_port():
     global __server_port
     return __server_port
+
+
+def companion_address() -> str:
+    global __companion_address
+    return __companion_address
+
+
+def companion_token() -> str:
+    global __companion_token
+    return __companion_token
 
 
 def ignore_empty_install_directory():
