@@ -646,6 +646,9 @@ class PendingTransfers:
                 return self.cargo_ships.add(transfer, next_stop)
         else:
             next_stop = transfer.destination
+        if self.game.dynamic_campaign:
+            # No airlift flights in a dynamic campaign; the transfer stays pending.
+            return
         AirliftPlanner(self.game, transfer, next_stop).create_package_for_airlift(now)
 
     def new_transfer(self, transfer: TransferOrder, now: datetime) -> None:

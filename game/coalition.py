@@ -189,7 +189,8 @@ class Coalition:
         with logged_duration("Transport planning"):
             self.transfers.plan_transports(self.game.conditions.start_time)
 
-        if not is_turn_0:
+        # A dynamic campaign plans no flights: the companion runs the war.
+        if not is_turn_0 and not self.game.dynamic_campaign:
             self.plan_missions(self.game.conditions.start_time)
         self.plan_procurement()
 

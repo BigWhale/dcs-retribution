@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from typing import List, Optional
 
@@ -85,6 +86,7 @@ class QTopPanel(QFrame):
         self.buttonBox.setLayout(self.buttonBoxLayout)
 
         self.simSpeedControls = SimSpeedControls(sim_controller)
+        self.show_sim_speed_controls = ui_flags.show_sim_speed_controls
 
         self.proceedBox = QGroupBox("Proceed")
         self.proceedBoxLayout = QHBoxLayout()
@@ -155,6 +157,15 @@ class QTopPanel(QFrame):
         else:
             raise RuntimeError(f"game.turn out of bounds!\n  value = {game.turn}")
 
+        # A dynamic campaign has no Take off and no Pass Turn: only Begin Campaign,
+        # on turn 0. A normal game shows them as before.
+        dynamic = game.dynamic_campaign
+        self.proceedButton.setVisible(not dynamic)
+        self.passTurnButton.setVisible(not dynamic or game.turn == 0)
+        if self.show_sim_speed_controls:
+            for button in self.simSpeedControls.buttons.values():
+                button.setVisible(not dynamic)
+
     def open_air_wing(self):
         self.dialog = AirWingDialog(self.game_model, self.window())
         self.dialog.show()
@@ -164,12 +175,28 @@ class QTopPanel(QFrame):
         self.dialog.show()
 
     def passTurn(self):
+        if self.game is not None and self.game.dynamic_campaign:
+            self.begin_dynamic_campaign()
+            return
         with logged_duration("Skipping turn"):
             self.game.pass_turn(no_action=True)
             GameUpdateSignal.get_instance().updateGame(self.game)
             state = self.game_model.game.check_win_loss()
             GameUpdateSignal.get_instance().gameStateChanged(state)
             self.proceedButton.setEnabled(True)
+
+    def begin_dynamic_campaign(self) -> None:
+        """Begins a dynamic campaign and writes its starting mission."""
+        game = self.game
+        assert game is not None
+        with logged_duration("Beginning dynamic campaign"):
+            game.pass_turn(no_action=True)
+            # Recreates the sim for the new turn, so it comes before generation.
+            GameUpdateSignal.get_instance().updateGame(game)
+            path = persistency.mission_path_for("retribution_dynamic.miz")
+            self.sim_controller.generate_miz(path)
+        logging.info("Dynamic campaign begun, mission written to %s", path)
+        self.passTurnButton.setVisible(False)
 
     def negative_start_packages(self, now: datetime) -> List[Package]:
         packages = []
