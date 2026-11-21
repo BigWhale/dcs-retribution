@@ -237,7 +237,7 @@ class CompanionLink(threading.Thread):
             except ValueError as e:
                 self._once("bad event", f"companion state event skipped: {e}")
                 return
-            log.info(
+            log.debug(
                 "companion snapshot: minute %d, %d units, %d statics, %d bytes",
                 snap.minute,
                 snap.unit_count,

@@ -41,3 +41,18 @@ loggers:
   uvicorn.error:
     level: INFO
     propagate: true
+  # The loggers below are named here so that dictConfig does not disable them:
+  # their modules create them on import, before logging is configured.
+  game.companionlink:
+    # The link to DCS Companion: state changes and failures. Its debug lines
+    # repeat on every retry (every 5 s while the companion is away).
+    level: INFO
+  qt_ui.companionlinkcontroller:
+    # One line per companion snapshot (each minute).
+    level: INFO
+  httpcore:
+    # Logs every connection step at debug: eight lines per companion retry.
+    level: INFO
+  httpx:
+    # Logs every request at info, a companion retry every 5 s among them.
+    level: WARNING
