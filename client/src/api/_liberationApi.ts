@@ -517,6 +517,19 @@ export type UnculledZone = {
   position: LatLng;
   radius: number;
 };
+export type LiveUnit = {
+  name: string;
+  group: string;
+  category: string;
+  type: string;
+  side: number;
+  position: LatLng;
+  altitude: number;
+  heading: number;
+  speed: number;
+  in_air: boolean;
+  player: string | null;
+};
 export type Game = {
   control_points: ControlPoint[];
   tgos: Tgo[];
@@ -529,6 +542,7 @@ export type Game = {
   map_center?: LatLng;
   unculled_zones: UnculledZone[];
   map_zones: MapZones;
+  live_units: LiveUnit[];
 };
 export type MapZones = {
   inclusion: LatLng[][][];

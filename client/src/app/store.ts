@@ -4,6 +4,7 @@ import controlPointsReducer from "../api/controlPointsSlice";
 import flightsReducer from "../api/flightsSlice";
 import frontLinesReducer from "../api/frontLinesSlice";
 import iadsNetworkReducer from "../api/iadsNetworkSlice";
+import liveUnitsReducer from "../api/liveUnitsSlice";
 import mapReducer from "../api/mapSlice";
 import navMeshReducer from "../api/navMeshSlice";
 import supplyRoutesReducer from "../api/supplyRoutesSlice";
@@ -28,6 +29,7 @@ const rootReducer = combineReducers({
   navmeshes: navMeshReducer,
   supplyRoutes: supplyRoutesReducer,
   iadsNetwork: iadsNetworkReducer,
+  liveUnits: liveUnitsReducer,
   tgos: tgosReducer,
   threatZones: threatZonesReducer,
   [baseApi.reducerPath]: baseApi.reducer,

@@ -9,6 +9,7 @@ import CullingExclusionZones from "../cullingexclusionzones/CullingExclusionZone
 import FlightPlansLayer from "../flightplanslayer";
 import FrontLinesLayer from "../frontlineslayer";
 import Iadsnetworklayer from "../iadsnetworklayer";
+import LiveUnitsLayer from "../liveunitslayer";
 import NavMeshLayer from "../navmesh/NavMeshLayer";
 import LeafletRuler from "../ruler/Ruler";
 import SupplyRoutesLayer from "../supplyrouteslayer";
@@ -47,6 +48,18 @@ export default function LiberationMap() {
         </LayersControl.Overlay>
         <LayersControl.Overlay name="Aircraft" checked>
           <AircraftLayer />
+        </LayersControl.Overlay>
+        <LayersControl.Overlay name="Live aircraft" checked>
+          <LiveUnitsLayer categories={["plane", "helicopter"]} />
+        </LayersControl.Overlay>
+        <LayersControl.Overlay name="Live ground units" checked>
+          <LiveUnitsLayer categories={["ground"]} />
+        </LayersControl.Overlay>
+        <LayersControl.Overlay name="Live ships" checked>
+          <LiveUnitsLayer categories={["ship"]} />
+        </LayersControl.Overlay>
+        <LayersControl.Overlay name="Live statics">
+          <LiveUnitsLayer categories={["static"]} />
         </LayersControl.Overlay>
         <LayersControl.Overlay name="Active combat" checked>
           <CombatLayer />

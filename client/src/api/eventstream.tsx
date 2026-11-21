@@ -21,12 +21,14 @@ import {
   Flight,
   FrontLine,
   IadsConnection,
+  LiveUnit,
   NavMesh,
   SupplyRoute,
   Tgo,
   ThreatZones,
   UnculledZone,
 } from "./liberationApi";
+import { liveUnitsReplaced } from "./liveUnitsSlice";
 import { navMeshUpdated } from "./navMeshSlice";
 import { updateTgo } from "./tgosSlice";
 import { threatZonesUpdated } from "./threatZonesSlice";
@@ -55,6 +57,7 @@ interface GameUpdateEvents {
   updated_iads: IadsConnection[];
   deleted_iads: string[];
   updated_supply_routes: SupplyRoute[];
+  live_units: LiveUnit[] | null;
   reset_on_map_center: LatLng | null;
   game_unloaded: boolean;
   new_turn: boolean;
@@ -140,6 +143,10 @@ export const handleStreamedEvents = (
 
   if (events.updated_supply_routes.length > 0) {
     dispatch(supplyRoutesUpdated(events.updated_supply_routes));
+  }
+
+  if (events.live_units != null) {
+    dispatch(liveUnitsReplaced(events.live_units));
   }
 
   if (events.reset_on_map_center != null) {
