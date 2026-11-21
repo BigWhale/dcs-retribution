@@ -11,6 +11,7 @@ from game.server.flights.models import FlightJs
 from game.server.frontlines.models import FrontLineJs
 from game.server.iadsnetwork.models import IadsConnectionJs
 from game.server.leaflet import LeafletPoint
+from game.server.liveunits.models import LiveUnitJs
 from game.server.mapzones.models import ThreatZonesJs, UnculledZoneJs
 from game.server.navmesh.models import NavMeshJs
 from game.server.supplyroutes.models import SupplyRouteJs
@@ -45,6 +46,7 @@ class GameUpdateEventsJs(BaseModel):
     reset_on_map_center: LeafletPoint | None
     game_unloaded: bool
     new_turn: bool
+    live_units: list[LiveUnitJs] | None
 
     @classmethod
     def from_events(
@@ -60,6 +62,7 @@ class GameUpdateEventsJs(BaseModel):
         updated_iads = []
         updated_supply_routes = []
         updated_front_lines = []
+        live_units = None
         if game is not None:
             new_combats = [
                 FrozenCombatJs.for_combat(c, game.theater) for c in events.new_combats
@@ -87,6 +90,8 @@ class GameUpdateEventsJs(BaseModel):
                 FrontLineJs.for_front_line(game.theater, f)
                 for f in events.updated_front_lines
             ]
+            if events.live_units is not None:
+                live_units = LiveUnitJs.all_for(events.live_units, game.theater)
 
         return GameUpdateEventsJs(
             updated_flight_positions={
@@ -121,4 +126,5 @@ class GameUpdateEventsJs(BaseModel):
             reset_on_map_center=events.reset_on_map_center,
             game_unloaded=events.game_unloaded,
             new_turn=events.new_turn,
+            live_units=live_units,
         )

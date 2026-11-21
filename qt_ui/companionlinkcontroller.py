@@ -18,6 +18,8 @@ from game import Game
 from game.companionlink.link import CompanionLink, LinkStatus
 from game.companionlink.livestate import LiveStateContext
 from game.companionlink.snapshot import LiveSnapshot
+from game.server import EventStream
+from game.sim import GameUpdateEvents
 from qt_ui import liberation_install
 
 log = logging.getLogger(__name__)
@@ -136,4 +138,5 @@ class CompanionLinkController(QObject):
             len(snapshot.units) - snapshot.unit_count,
             snapshot.size,
         )
+        EventStream.put_nowait(GameUpdateEvents().update_live_units(snapshot))
         self.snapshot_received.emit(snapshot)

@@ -8,7 +8,9 @@ from game.server.controlpoints.models import ControlPointJs
 from game.server.flights.models import FlightJs
 from game.server.frontlines.models import FrontLineJs
 from game.server.iadsnetwork.models import IadsNetworkJs
+from game.companionlink.livestate import LiveStateContext
 from game.server.leaflet import LeafletPoint
+from game.server.liveunits.models import LiveUnitJs
 from game.server.mapzones.models import (
     ThreatZoneContainerJs,
     UnculledZoneJs,
@@ -34,6 +36,7 @@ class GameJs(BaseModel):
     map_center: LeafletPoint | None
     unculled_zones: list[UnculledZoneJs]
     map_zones: MapZonesJs
+    live_units: list[LiveUnitJs]
 
     class Config:
         title = "Game"
@@ -54,4 +57,5 @@ class GameJs(BaseModel):
             ),
             unculled_zones=UnculledZoneJs.from_game(game),
             map_zones=MapZonesJs.from_game(game),
+            live_units=LiveUnitJs.all_for(LiveStateContext.get(), game.theater),
         )

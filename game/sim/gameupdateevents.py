@@ -9,6 +9,7 @@ from dcs.mapping import LatLng
 
 if TYPE_CHECKING:
     from game import Game
+    from game.companionlink.snapshot import LiveSnapshot
     from game.ato import Flight, Package
     from game.navmesh import NavMesh
     from game.sim.combat import FrozenCombat
@@ -40,6 +41,8 @@ class GameUpdateEvents:
     deleted_iads_connections: set[UUID] = field(default_factory=set)
     updated_supply_routes: bool = False
     reset_on_map_center: LatLng | None = None
+    # The running mission's newest snapshot, which replaces the last; None: no change.
+    live_units: LiveSnapshot | None = None
     game_unloaded: bool = False
     new_turn: bool = False
     shutting_down: bool = False
@@ -140,6 +143,10 @@ class GameUpdateEvents:
 
     def update_supply_routes(self) -> GameUpdateEvents:
         self.updated_supply_routes = True
+        return self
+
+    def update_live_units(self, snapshot: LiveSnapshot) -> GameUpdateEvents:
+        self.live_units = snapshot
         return self
 
     def game_loaded(self, game: Game | None) -> GameUpdateEvents:
