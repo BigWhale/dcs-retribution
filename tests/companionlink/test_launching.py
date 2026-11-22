@@ -175,7 +175,10 @@ def coalition(dynamic: bool, calls: list[str]) -> Coalition:
         conditions=SimpleNamespace(start_time=at("08:00")),
     )
     c.ato = SimpleNamespace(clear=record(calls, "ato.clear"))  # type: ignore
-    c.air_wing = SimpleNamespace(reset=record(calls, "air_wing.reset"))  # type: ignore
+    c.air_wing = SimpleNamespace(  # type: ignore
+        reset=record(calls, "air_wing.reset"),
+        reset_keeping_ato=record(calls, "air_wing.reset_keeping_ato"),
+    )
     c.procurement_requests = SimpleNamespace(  # type: ignore
         clear=record(calls, "procurement_requests.clear")
     )
@@ -198,6 +201,7 @@ def test_dynamic_initialize_turn_keeps_ato() -> None:
     coalition(True, calls).initialize_turn(is_turn_0=False)
     assert "ato.clear" not in calls
     assert "air_wing.reset" not in calls
+    assert "air_wing.reset_keeping_ato" in calls
     assert "plan_transports" in calls
     assert "plan_procurement" in calls
 
@@ -205,4 +209,5 @@ def test_dynamic_initialize_turn_keeps_ato() -> None:
     coalition(False, calls).initialize_turn(is_turn_0=False)
     assert "ato.clear" in calls
     assert "air_wing.reset" in calls
+    assert "air_wing.reset_keeping_ato" not in calls
     assert "plan_missions" in calls

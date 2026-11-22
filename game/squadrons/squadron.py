@@ -267,6 +267,26 @@ class Squadron:
         self.available_pilots = list(self.active_pilots)
         self.untasked_aircraft = self.owned_aircraft
 
+    def return_all_but_held_by(self, flights: Iterable[Flight]) -> None:
+        """Returns the pilots and aircraft that the given flights do not hold.
+
+        A dynamic campaign keeps its ATO across turn initializations: its flights,
+        launched or not, keep their aircraft and pilots, the rest is free again.
+        """
+        held_aircraft = 0
+        held_pilots: set[int] = set()
+        for flight in flights:
+            if flight.squadron is not self:
+                continue
+            held_aircraft += flight.count
+            held_pilots.update(
+                id(p) for p in flight.roster.iter_pilots() if p is not None
+            )
+        self.available_pilots = [
+            p for p in self.active_pilots if id(p) not in held_pilots
+        ]
+        self.untasked_aircraft = max(0, self.owned_aircraft - held_aircraft)
+
     @staticmethod
     def send_on_leave(pilot: Pilot) -> None:
         pilot.send_on_leave()

@@ -390,6 +390,9 @@ class Game:
                 # Rotate the whole TGO with the new heading
                 tgo.rotate(heading or tgo.heading)
 
+        # A dynamic campaign always starts with its squadrons full.
+        if self.dynamic_campaign:
+            squadrons_start_full = True
         self.blue.preinit_turn_0(squadrons_start_full)
         self.red.preinit_turn_0(squadrons_start_full)
         # TODO: Check for overfull bases.

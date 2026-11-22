@@ -163,8 +163,13 @@ class NewGameWizard(QtWidgets.QWizard):
         )
         self.generatedGame = generator.generate()
 
+        # A dynamic campaign always starts with its squadrons full.
+        squadrons_start_full = (
+            generator.generator_settings.squadrons_start_full
+            or bool(self.field("dynamic_campaign"))
+        )
         AirWingConfigurationDialog(
-            self.generatedGame, generator.generator_settings.squadrons_start_full, self
+            self.generatedGame, squadrons_start_full, self
         ).exec_()
 
         g = self.generatedGame

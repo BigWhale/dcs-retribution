@@ -152,6 +152,11 @@ class Migrator:
             self.game.db.flights.remove(fid)
 
     def _release_untasked_flights(self) -> None:
+        if self.game.dynamic_campaign:
+            # The ATO's flights keep exactly the aircraft and pilots they hold.
+            for coalition in (self.game.blue, self.game.red):
+                coalition.air_wing.reset_keeping_ato(coalition.ato)
+            return
         for cp in self.game.theater.controlpoints:
             for s in cp.squadrons:
                 count = 0

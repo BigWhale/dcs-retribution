@@ -13,6 +13,7 @@ from ..theater import ControlPoint, MissionTarget
 from ..utils import Distance
 
 if TYPE_CHECKING:
+    from game.ato.airtaaskingorder import AirTaskingOrder
     from game.game import Game
     from game.theater.player import Player
     from ..ato.flighttype import FlightType
@@ -175,6 +176,12 @@ class AirWing:
     def reset(self) -> None:
         for squadron in self.iter_squadrons():
             squadron.return_all_pilots_and_aircraft()
+
+    def reset_keeping_ato(self, ato: AirTaskingOrder) -> None:
+        """Like reset, but the ATO's flights keep the aircraft and pilots they hold."""
+        flights = [f for p in ato.packages for f in p.flights]
+        for squadron in self.iter_squadrons():
+            squadron.return_all_but_held_by(flights)
 
     @property
     def size(self) -> int:
