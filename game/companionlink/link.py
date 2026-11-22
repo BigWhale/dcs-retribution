@@ -12,6 +12,8 @@ log's `lastSeq`, a page of at most `EVENTS_PAGE` entries at a time, and hands
 each page to `on_events` as an `EventBatch`. Without `events_after` it starts
 at the first hello's `lastSeq`, with an empty batch, so the log's history is
 never read. Its cursor outlives a connection, so a reconnect misses nothing.
+An entry that cannot be read is skipped, with one warning per page, and the
+cursor moves past it all the same.
 
 Whatever goes wrong (the companion not there, a refused token, a dropped or
 silent stream, a bad event, a failed read of the log) is logged once per kind
@@ -259,24 +261,25 @@ class CompanionLink(threading.Thread):
                     "events", f"the companion's events are bad: {e}", LinkStatus.WAITING
                 )
             if page.skipped:
-                self._once(
-                    "bad entry",
-                    f"companion events: {page.skipped} entries after "
-                    f"{self._after} skipped",
+                log.warning(
+                    "companion events: %d entries after %d skipped",
+                    page.skipped,
+                    self._after,
                 )
-            if not page.entries:
-                return
-            through = page.entries[-1].seq
-            log.debug(
-                "companion events: %d entries through %d (log at %d)",
-                len(page.entries),
-                through,
-                page.last_seq,
-            )
-            if not self._deliver(self._on_events, EventBatch(page.entries, through)):
-                return
-            self._after = through
-            if through >= page.last_seq:
+            if page.through <= self._after:
+                return  # empty, or nothing with a seq to move past
+            if page.entries:
+                log.debug(
+                    "companion events: %d entries through %d (log at %d)",
+                    len(page.entries),
+                    page.through,
+                    page.last_seq,
+                )
+                batch = EventBatch(page.entries, page.through)
+                if not self._deliver(self._on_events, batch):
+                    return
+            self._after = page.through
+            if page.through >= page.last_seq:
                 return
 
     def _read(self, chunks: Iterable[bytes], client: httpx.Client) -> None:

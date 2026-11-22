@@ -601,6 +601,68 @@ def test_bad_entry_skipped(
     assert len(warnings) == 1
 
 
+def test_trailing_bad_entries_not_asked_again(
+    serve: Any, connect: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="game.companionlink")
+    notice = threading.Event()
+    fake = serve([notice, event("events", '{"lastSeq":4}')])
+    fake.add(1, 2, 3)
+    del fake.entries[1]["kind"]
+    del fake.entries[2]["kind"]
+    _, rec = connect(fake.address, events_after=0, events=True)
+    wait_for(lambda: len(rec.batches) == 1)
+    fake.add(4)
+    notice.set()
+    wait_for(lambda: len(rec.batches) == 2)
+
+    assert [[e.seq for e in b.entries] for b in rec.batches] == [[1], [4]]
+    assert [b.through for b in rec.batches] == [3, 4]
+    assert fake.afters == [0, 3]
+    warnings = [
+        r
+        for r in caplog.records
+        if r.name == "game.companionlink" and r.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert "2 entries" in warnings[0].getMessage()
+
+
+def test_page_of_bad_entries_does_not_stall(
+    serve: Any, connect: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="game.companionlink")
+    notices = [threading.Event(), threading.Event()]
+    fake = serve(
+        [
+            notices[0],
+            event("events", '{"lastSeq":2}'),
+            notices[1],
+            event("events", '{"lastSeq":3}'),
+        ]
+    )
+    fake.add(1, 2)
+    del fake.entries[0]["kind"]
+    del fake.entries[1]["kind"]
+    _, rec = connect(fake.address, events_after=0, events=True)
+    wait_for(lambda: LinkStatus.LINKED in rec.statuses)
+    notices[0].set()  # the same bad page is not asked again
+    wait_for(lambda: len(fake.afters) == 2)
+    fake.add(3)
+    notices[1].set()
+    wait_for(lambda: len(rec.batches) == 1)
+
+    assert rec.seqs() == [3]
+    assert rec.batches[0].through == 3
+    assert fake.afters == [0, 2, 2]
+    warnings = [
+        r
+        for r in caplog.records
+        if r.name == "game.companionlink" and r.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+
+
 def test_parse_events_page() -> None:
     full = entry(
         7,
@@ -635,6 +697,7 @@ def test_parse_events_page() -> None:
 
     assert page.last_seq == 9
     assert page.skipped == 2
+    assert page.through == 8  # the bad entry's seq counts
     assert len(page.entries) == 1
     e = page.entries[0]
     assert e.seq == 7

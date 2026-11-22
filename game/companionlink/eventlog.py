@@ -59,6 +59,9 @@ class EventsPage:
     entries: tuple[LogEntry, ...]
     last_seq: int  # the log's last seq when the page was read
     skipped: int  # entries that could not be read
+    #: The highest whole `seq` of any entry in the page, read or skipped; 0
+    #: when none, so a reader moves past bad entries and never asks again.
+    through: int = 0
 
 
 @dataclass(frozen=True)
@@ -77,7 +80,8 @@ def parse_events_page(data: str) -> EventsPage:
     """A page of the log; ValueError on bad JSON or no whole `lastSeq`.
 
     An entry that is not an object or lacks `seq`, `kind`, `boot` or
-    `session` is skipped and counted, so one odd line never costs the page.
+    `session` is skipped and counted, so one odd line never costs the page;
+    a skipped entry's whole `seq` still counts in `through`.
     """
     body = json.loads(data)
     if not isinstance(body, dict):
@@ -90,13 +94,18 @@ def parse_events_page(data: str) -> EventsPage:
         raw = []
     entries: list[LogEntry] = []
     skipped = 0
+    through = 0
     for item in raw:
+        if isinstance(item, dict):
+            seq = _whole(item.get("seq"))
+            if seq is not None:
+                through = max(through, seq)
         entry = _entry(item)
         if entry is None:
             skipped += 1
         else:
             entries.append(entry)
-    return EventsPage(tuple(entries), last_seq, skipped)
+    return EventsPage(tuple(entries), last_seq, skipped, through)
 
 
 def _entry(item: Any) -> Optional[LogEntry]:
