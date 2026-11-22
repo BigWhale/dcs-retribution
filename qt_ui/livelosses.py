@@ -6,7 +6,9 @@ mission is decided and releases only the campaign's own (`game.live.ready`).
 They are applied at most `CHUNK` at a time, each chunk a batch of its own
 (`apply_entries`, then `settle`), and the rest on the next turn of the Qt
 event loop, so a catch-up of thousands of entries never stalls the window.
-A new verdict may release held entries, so it drains too.
+A new verdict may release held entries, so it drains too. The batch that
+gives the game its first cursor saves the game (autosave), so a reload does
+not start the cursor afresh past the mission's entries.
 
 A finished flight (every unit dead or landed) and a stranded one (not
 launched, its departure captured) leave the ATO through its Qt models, so
@@ -24,7 +26,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, QTimer, Slot
 from PySide6.QtWidgets import QDialog
 
-from game import Game
+from game import Game, persistency
 from game.ato.flight import Flight
 from game.companionlink.eventlog import EventBatch
 from game.companionlink.livelosses import LiveBatch, apply_entries, settle
@@ -74,8 +76,11 @@ class LiveLosses(QObject):
         game = self._dynamic_game()
         if game is None:
             return
+        had_cursor = game.live.cursor is not None
         game.live.receive(batch)
         self._drain()
+        if not had_cursor and game.live.cursor is not None:
+            persistency.autosave(game)
 
     @Slot(object)
     def _on_verdict(self, _verdict: object) -> None:

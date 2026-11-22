@@ -180,6 +180,7 @@ TERRAINS: list[Callable[[], Terrain]] = [
     for t in vars(dcs.terrain).values()
     if isinstance(t, type) and issubclass(t, Terrain) and t is not Terrain
 ]
+assert TERRAINS
 
 
 @pytest.mark.parametrize("terrain_type", TERRAINS, ids=lambda t: t.__name__)
@@ -427,6 +428,7 @@ def test_record_survives_save_and_load(started: Started, tmp_path: Path) -> None
     record.applied(42)
     record.dead.add("Uzi 1-1")
     record.receive(EventBatch((entry(43, "boot", 7),), through=43))
+    assert record.following_own_mission
     game.savepath = str(tmp_path / "live.retribution")
 
     assert persistency.save_game(game)
@@ -443,6 +445,8 @@ def test_record_survives_save_and_load(started: Started, tmp_path: Path) -> None
     for field, value in vars(record.name_map).items():
         assert getattr(live.name_map, field).keys() == value.keys(), field
     assert live.ready() == []  # held entries are not saved; the link reads again
+    # No mission is followed until a snapshot decides one again.
+    assert not live.following_own_mission
 
 
 # Losses applied: entries of the campaign's own mission, applied as a turn
@@ -572,6 +576,46 @@ def test_flight_finished_when_rest_landed(live: Live) -> None:
         f.count for f in ato_flights(game, Player.BLUE) if f.squadron is squadron
     )
     assert squadron.untasked_aircraft == squadron.owned_aircraft - held
+
+
+def test_relaunch_replaces_names(live: Live) -> None:
+    game, flight = live.game, live.flight
+    name_map = game.live.name_map
+
+    name_map.add_launched(flight, ["LIVE 2-1", "LIVE 2-2"])
+
+    assert name_map.flight_units(flight) == ["LIVE 2-1", "LIVE 2-2"]
+    assert "LIVE 1-1" not in name_map.aircraft
+    assert "LIVE 1-2" not in name_map.aircraft
+
+
+def test_finished_flight_landed_aircraft_holds_no_pilot(live: Live) -> None:
+    game, flight = live.game, live.flight
+    squadron = flight.squadron
+    name_map = game.live.name_map
+    lead, wing = (
+        name_map.aircraft["LIVE 1-1"].pilot,
+        name_map.aircraft["LIVE 1-2"].pilot,
+    )
+    assert lead is not None and wing is not None
+    batch = apply_entries(
+        game,
+        [
+            log(1, "dead", "LIVE 1-1", category="plane"),
+            log(2, "land", "LIVE 1-2", category="plane", place="Ramat David"),
+        ],
+    )
+    assert batch.finished == [flight]
+    finish_flight(game, flight)
+    settle(game, batch)
+    owned = squadron.owned_aircraft
+
+    # Destroyed on the ramp after its flight went home.
+    settle(game, apply_entries(game, [log(3, "dead", "LIVE 1-2", category="plane")]))
+
+    assert squadron.owned_aircraft == owned - 1
+    assert wing.alive
+    assert [p for p in squadron.current_roster if not p.alive] == [lead]
 
 
 def test_parked_aircraft_destroyed(live: Live) -> None:

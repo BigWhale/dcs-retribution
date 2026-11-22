@@ -242,9 +242,26 @@ class QTopPanel(QFrame):
                 # Its losses are debriefed against the names it was written
                 # with, kept with the save.
                 game_loop = self.sim_controller.game_loop
-                assert game_loop is not None and game_loop.sim.unit_map is not None
-                unit_map = game_loop.sim.unit_map
-                game.live.written(LiveUnitMap.from_generation(unit_map, game))
+                unit_map = game_loop.sim.unit_map if game_loop is not None else None
+                if unit_map is None:
+                    logging.error(
+                        "Dynamic campaign: %s was written but its name map is "
+                        "missing; live losses will not apply",
+                        path,
+                    )
+                    QMessageBox.warning(
+                        self,
+                        "Live losses will not apply",
+                        (
+                            f"The dynamic campaign has begun and its starting "
+                            f"mission ({path.name}) was written, but the mission's "
+                            "name map is missing, so live losses will not apply to "
+                            "the campaign.<br /><br />Start a new dynamic campaign."
+                        ),
+                        QMessageBox.StandardButton.Ok,
+                    )
+                else:
+                    game.live.written(LiveUnitMap.from_generation(unit_map, game))
                 persistency.autosave(game)
         self.passTurnButton.setVisible(False)
         self.companion_link.start(game)

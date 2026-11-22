@@ -16,7 +16,10 @@ type that is not a crash model leaves one, once per name. A launched flight
 whose every unit is dead or landed is finished, and a flight not launched
 whose base was captured is stranded; both are returned for the caller to
 remove (the GUI through its models, `finish_flight` headless), then `settle`
-frees the squadrons' aircraft and pilots and redraws the threat zones.
+frees the squadrons' aircraft and pilots and redraws the threat zones. A
+finished flight's landed aircraft keep no pilot in the map: the pilots went
+home with the flight, so one destroyed on the ramp later costs the aircraft
+only, as a parked aircraft does.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from game.sim.gameupdateevents import GameUpdateEvents
 from game.sim.missionresultsprocessor import MissionResultsProcessor
 from game.squadrons import Squadron
 from game.theater import Airfield, Carrier, ControlPoint, Lha, OffMapSpawn
+from game.unitmap import FlyingUnit
 
 if TYPE_CHECKING:
     from game import Game
@@ -149,6 +153,10 @@ def apply_entries(game: Game, entries: Sequence[LogEntry]) -> LiveBatch:
     MissionResultsProcessor(game).commit_live(debriefing, events)
 
     finished = _finished(record, touched)
+    for flight in finished:
+        for name in name_map.flight_units(flight):
+            if name in record.landed:
+                name_map.aircraft[name] = FlyingUnit(flight, None)
     squadrons.update(f.squadron for f in finished + stranded)
     return LiveBatch(
         entries=len(entries),

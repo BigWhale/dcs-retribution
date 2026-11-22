@@ -9,9 +9,10 @@ the campaign's own mission is followed; entries of the event log wait until
 their mission is decided, and only the accepted mission's are applied.
 
 The record is saved with the game: the marker, the name map, the verdicts,
-the log cursor and the names already counted dead or seen landing. Entries
-held for a mission not yet decided are not saved; the link reads them again
-from the cursor.
+the log cursor and the names already counted dead or seen landing. The
+current mission is not saved: a reloaded game follows none until a snapshot
+decides one, as after a lost link. Entries held for a mission not yet decided
+are not saved; the link reads them again from the cursor.
 """
 
 from __future__ import annotations
@@ -69,12 +70,14 @@ class LiveRecord:
 
     def __getstate__(self) -> dict[str, Any]:
         state = self.__dict__.copy()
+        del state["current"]
         del state["_pending"]
         del state["_told_no_marker"]
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
+        self.current = None
         self._pending = []
         self._told_no_marker = False
 

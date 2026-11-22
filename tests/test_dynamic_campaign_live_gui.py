@@ -25,6 +25,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from game import persistency  # noqa: E402
 from game.ato.flight import Flight  # noqa: E402
 from game.companionlink.livestate import LiveStateContext  # noqa: E402
 from game.companionlink.liverecord import MARKER_PREFIX  # noqa: E402
@@ -35,9 +36,12 @@ from game.sim import GameUpdateEvents  # noqa: E402
 from game.theater import Player  # noqa: E402
 from qt_ui import companionlinkcontroller, liberation_install, livelosses  # noqa: E402
 from qt_ui.companionlinkcontroller import CompanionLinkController  # noqa: E402
+from qt_ui.flightlauncher import FlightLauncher  # noqa: E402
 from qt_ui.livelosses import LiveLosses  # noqa: E402
 from qt_ui.models import GameModel  # noqa: E402
 from qt_ui.simcontroller import SimController  # noqa: E402
+from tests.companionlink.test_commands import TOKEN as COMMAND_TOKEN  # noqa: E402
+from tests.companionlink.test_commands import FakeCommands  # noqa: E402
 from tests.companionlink.test_link import (  # noqa: E402
     TOKEN,
     FakeCompanion,
@@ -328,3 +332,83 @@ def test_failed_chunk_skipped_and_logged(
     assert line.startswith("Live losses: 100 entries, 1 dead, ")
     assert "LIVE 1-2" in game.live.dead
     assert "LIVE 1-1" not in game.live.dead
+
+
+def test_first_cursor_saved(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[[FakeCompanion], Window],
+    game: Game,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saves: list[Game] = []
+
+    def autosave(g: Game) -> bool:
+        saves.append(g)
+        return True
+
+    monkeypatch.setattr(persistency, "autosave", autosave)
+
+    gate = threading.Event()
+    fake = serve([event("state", state(game, 1)), gate, event("events", "{}")])
+    w = window(fake)
+    w.wait_for(lambda: following(game) and game.live.cursor == 0)
+    assert saves == [game]
+
+    with fake.lock:
+        fake.entries.extend(filler(seq) for seq in range(1, 3))
+    gate.set()
+    w.wait_for(lambda: game.live.cursor == 2)
+    assert saves == [game]
+
+
+@pytest.fixture
+def commands() -> Iterator[FakeCommands]:
+    f = FakeCommands()
+    f.start()
+    yield f
+    f.close()
+
+
+def test_sent_flight_losses_applied_before_confirmed(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[[FakeCompanion], Window],
+    game: Game,
+    commands: FakeCommands,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        liberation_install, "companion_command_address", lambda: commands.address
+    )
+    monkeypatch.setattr(
+        liberation_install, "companion_command_token", lambda: COMMAND_TOKEN
+    )
+    commands.statuses = ["waiting"]  # accepted, never confirmed
+
+    gate = threading.Event()
+    fake = serve([event("state", state(game, 1)), gate, event("events", "{}")])
+    w = window(fake)
+    launcher = FlightLauncher(w.link)
+    launcher.confirm_warn_s = launcher.confirm_cap_s = 1.0
+    launcher.set_game(game)
+    try:
+        w.wait_for(lambda: following(game) and launcher.receiving)
+        flight = plan_by_hand(game, 2)
+        squadron = flight.squadron
+        owned = squadron.owned_aircraft
+
+        launcher.launch_now(flight)
+        w.wait_for(lambda: len(commands.requests) == 1)
+        assert launcher.is_busy(flight) and not flight.launched
+        sent = commands.requests[0][0]["group"]["units"]
+        names = [u["name"] for u in sent.values()]
+        assert game.live.name_map.flight_units(flight) == names
+
+        with fake.lock:
+            fake.entries.append(plane(1, "dead", names[0]))
+        gate.set()
+        w.wait_for(lambda: game.live.cursor == 1)
+
+        assert names[0] in game.live.dead
+        assert squadron.owned_aircraft == owned - 1
+    finally:
+        launcher.stop()

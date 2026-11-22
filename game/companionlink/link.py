@@ -12,6 +12,9 @@ log's `lastSeq`, a page of at most `EVENTS_PAGE` entries at a time, and hands
 each page to `on_events` as an `EventBatch`. Without `events_after` it starts
 at the first hello's `lastSeq`, with an empty batch, so the log's history is
 never read. Its cursor outlives a connection, so a reconnect misses nothing.
+A hello whose `lastSeq` is below the cursor (the companion's log is not the
+one the cursor was read from, or was cut short) is warned about once per
+connection; nothing new is handed over until the log passes the cursor.
 An entry that cannot be read is skipped, with one warning per page, and the
 cursor moves past it all the same.
 
@@ -93,6 +96,8 @@ class CompanionLink(threading.Thread):
         self._after: Optional[int] = events_after
         # The last hello's lastSeq, when it had one.
         self._hello_last: Optional[int] = None
+        # Whether this connection warned of a log that ends before the cursor.
+        self._told_behind = False
         self._halt = threading.Event()
         # Guards _halted and _sock, and holds a callback while it runs, so
         # none starts once stop() has set _halted.
@@ -211,6 +216,7 @@ class CompanionLink(threading.Thread):
             hello.get("boot"),
             hello.get("session"),
         )
+        self._told_behind = False
         last = hello.get("lastSeq")
         self._hello_last = (
             last if isinstance(last, int) and not isinstance(last, bool) else None
@@ -248,6 +254,18 @@ class CompanionLink(threading.Thread):
                 self._after = self._hello_last
                 log.info("companion events: a new cursor at %d", self._after)
             return
+        if (
+            not self._told_behind
+            and self._hello_last is not None
+            and self._hello_last < self._after
+        ):
+            self._told_behind = True
+            log.warning(
+                "Live losses: the companion's event log ends at %d, before this "
+                "campaign's cursor %d; nothing is read until it catches up",
+                self._hello_last,
+                self._after,
+            )
         while not self._halt.is_set():
             resp = client.get(
                 f"{self._address}/v1/events",

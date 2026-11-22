@@ -556,7 +556,8 @@ def test_events_paged(serve: Any, connect: Any) -> None:
 
 
 def test_events_new_cursor_starts_at_hello(serve: Any, connect: Any) -> None:
-    fake = serve()
+    notice = threading.Event()
+    fake = serve([notice, event("events", '{"lastSeq":41}')])
     fake.add(*range(1, 41))
     _, rec = connect(fake.address, events_after=None, events=True)
     wait_for(lambda: len(rec.batches) == 1)
@@ -564,7 +565,45 @@ def test_events_new_cursor_starts_at_hello(serve: Any, connect: Any) -> None:
 
     assert rec.batches[0].entries == ()
     assert rec.batches[0].through == 40
-    assert all(after >= 40 for after in fake.afters)
+    assert fake.afters == []  # the log's history is never read
+    fake.add(41)
+    notice.set()
+    wait_for(lambda: len(rec.batches) == 2)
+
+    assert fake.afters == [40]
+    assert rec.seqs() == [41]
+
+
+def test_cursor_above_log_said_once_per_connection(
+    serve: Any, connect: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="game.companionlink")
+    notices, drop = threading.Event(), threading.Event()
+    fake = serve(
+        [notices, event("events", "{}"), event("events", "{}"), drop, CLOSE], []
+    )
+    fake.add(1, 2, 3, 4, 5)
+    _, rec = connect(fake.address, retry=0.1, events_after=10, events=True)
+    wait_for(lambda: len(fake.afters) == 1)
+    notices.set()
+    wait_for(lambda: len(fake.afters) == 3)
+    drop.set()
+    wait_for(lambda: fake.streams == 2 and len(fake.afters) == 4)
+
+    behind = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "event log ends" in r.getMessage()
+    ]
+    assert (
+        behind
+        == [
+            "Live losses: the companion's event log ends at 5, before this "
+            "campaign's cursor 10; nothing is read until it catches up"
+        ]
+        * 2
+    )
+    assert rec.batches == []
 
 
 def test_events_reconnect_misses_nothing(serve: Any, connect: Any) -> None:

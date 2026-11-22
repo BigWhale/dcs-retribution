@@ -91,11 +91,21 @@ class LiveUnitMap(UnitMap):
         return m
 
     def add_launched(self, flight: Flight, unit_names: Sequence[str]) -> None:
-        """A launched flight's units, by the names the companion spawned.
+        """A launched flight's units, by the names they are sent with.
 
         Zipped with the roster as `UnitMap.add_aircraft` zips the group's
-        units, airlift cargo included; a name already mapped is replaced.
+        units, airlift cargo included; a name already mapped is replaced. The
+        names the flight had before (an earlier attempt's) are dropped first,
+        so the map holds only the flight's latest names.
         """
+        old = set(self.flight_units(flight))
+        if flight.cargo is not None:
+            old.update(
+                n for n, a in self.airlifts.items() if a.transfer is flight.cargo
+            )
+        for name in old:
+            self.aircraft.pop(name, None)
+            self.airlifts.pop(name, None)
         for pilot, name in zip(flight.roster.iter_pilots(), unit_names):
             self.aircraft[name] = FlyingUnit(flight, pilot)
         transfer = flight.cargo
