@@ -37,7 +37,7 @@ def _live_units_or_none(
     and the event stream keeps running.
     """
     try:
-        return LiveUnitJs.all_for(events.live_units, game.theater)
+        return LiveUnitJs.all_for(events.live_units, game)
     except Exception as ex:
         kind = type(ex).__name__
         if kind not in _warned_live_unit_errors:

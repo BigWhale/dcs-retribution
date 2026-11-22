@@ -123,6 +123,8 @@ class FlightLauncher(QObject):
         self._epoch = 0
         self._in_progress: set[Flight] = set()
         self._failed: set[Flight] = set()
+        # The group name each flight on its way was sent as.
+        self._sent_as: dict[Flight, str] = {}
         # The mission the ids and names below were handed out in.
         self._mission: Optional[tuple[str, int]] = None
         self._ids = IdAllocator()
@@ -159,6 +161,7 @@ class FlightLauncher(QObject):
         self._epoch += 1
         self._in_progress.clear()
         self._failed.clear()
+        self._sent_as.clear()
         self._forget_mission()
         if game is not None and game.dynamic_campaign:
             self._timer.start()
@@ -248,6 +251,7 @@ class FlightLauncher(QObject):
             now.isoformat(sep=" ", timespec="seconds"),
             model_time,
         )
+        self._sent_as[flight] = request.name
         worker = threading.Thread(
             target=self._send,
             args=(
@@ -379,11 +383,13 @@ class FlightLauncher(QObject):
             return
         self._in_progress.discard(flight)
         flight.launched = True
+        flight.live_group_name = self._sent_as.pop(flight, None)
         log.info("Launch: %s is in flight (spawn %s)", flight, spawn_id)
         self.launched.emit(flight)
 
     def _fail(self, flight: Flight, message: str) -> None:
         self._in_progress.discard(flight)
+        self._sent_as.pop(flight, None)
         self._failed.add(flight)
         log.warning("Launch failed: %s", message)
         self.launch_failed.emit(flight, message)

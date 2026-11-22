@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import uuid
 from asyncio import Queue
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,11 +31,13 @@ def _persistency(tmp_path: Path) -> None:
     persistency.setup(str(tmp_path), prefer_liberation_payloads=False, port=16884)
 
 
-def _unit(category: str, type_name: str, side: int) -> LiveUnit:
+def _unit(
+    category: str, type_name: str, side: int, name: str = "u", group: str = "g"
+) -> LiveUnit:
     centre = PersianGulf().map_view_default.position
     return LiveUnit(
-        name="u",
-        group="g",
+        name=name,
+        group=group,
         category=category,
         type=type_name,
         side=side,
@@ -68,9 +71,9 @@ def test_all_for_places_units_on_the_map() -> None:
     snapshot = LiveSnapshot(
         minute=12, boot="b", session=1, model_time=720.0, units=(unit,), size=0
     )
-    theater: Any = SimpleNamespace(terrain=terrain)
+    game: Any = SimpleNamespace(theater=SimpleNamespace(terrain=terrain), coalitions=[])
 
-    [js] = LiveUnitJs.all_for(snapshot, theater)
+    [js] = LiveUnitJs.all_for(snapshot, game)
 
     assert 24 < js.position.lat < 30 and 50 < js.position.lng < 60
     assert (js.name, js.side, js.altitude, js.in_air, js.player) == (
@@ -80,7 +83,33 @@ def test_all_for_places_units_on_the_map() -> None:
         True,
         "Bob",
     )
-    assert LiveUnitJs.all_for(None, theater) == []
+    assert LiveUnitJs.all_for(None, game) == []
+
+
+def test_launched_flight_units_carry_flight_id() -> None:
+    launched = "Uzi 1|2|7|F-16C_50|"
+    units = (
+        _unit("plane", "F-16C_50", 2, name="Uzi 1-1", group=launched),
+        _unit("plane", "F-16C_50", 2, name="Uzi 1-2", group=launched),
+        _unit("plane", "F-16C_50", 2, name="Parked 1-1", group="Parked 1"),
+        _unit("static", "FARP", 2, name="FARP", group=""),
+    )
+    snapshot = LiveSnapshot(
+        minute=1, boot="b", session=1, model_time=60.0, units=units, size=0
+    )
+    flight = SimpleNamespace(id=uuid.uuid4(), live_group_name=launched)
+    not_launched = SimpleNamespace(id=uuid.uuid4(), live_group_name=None)
+    blue = SimpleNamespace(
+        ato=SimpleNamespace(packages=[SimpleNamespace(flights=[not_launched, flight])])
+    )
+    red = SimpleNamespace(ato=SimpleNamespace(packages=[]))
+    game: Any = SimpleNamespace(
+        theater=SimpleNamespace(terrain=PersianGulf()), coalitions=[blue, red]
+    )
+
+    js = LiveUnitJs.all_for(snapshot, game)
+
+    assert [u.flight_id for u in js] == [flight.id, flight.id, None, None]
 
 
 def test_a_snapshot_that_does_not_convert_is_skipped(
@@ -109,7 +138,9 @@ def test_a_snapshot_that_does_not_convert_is_skipped(
         minute=12, boot="b", session=1, model_time=720.0, units=(unit,), size=0
     )
     game: Any = SimpleNamespace(
-        theater=SimpleNamespace(terrain=terrain), get_culling_zones=lambda: []
+        theater=SimpleNamespace(terrain=terrain),
+        coalitions=[],
+        get_culling_zones=lambda: [],
     )
     events = GameUpdateEvents().begin_new_turn().update_live_units(snapshot)
 
@@ -180,9 +211,11 @@ def test_sidc_in_json() -> None:
     snapshot = LiveSnapshot(
         minute=1, boot="b", session=1, model_time=60.0, units=(unit,), size=0
     )
-    theater: Any = SimpleNamespace(terrain=PersianGulf())
+    game: Any = SimpleNamespace(
+        theater=SimpleNamespace(terrain=PersianGulf()), coalitions=[]
+    )
 
-    [js] = LiveUnitJs.all_for(snapshot, theater)
+    [js] = LiveUnitJs.all_for(snapshot, game)
 
     assert len(js.sidc) == 20 and js.sidc.isdigit()
     assert js.sidc == str(live_unit_sidc(unit))

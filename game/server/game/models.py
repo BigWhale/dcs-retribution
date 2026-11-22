@@ -57,5 +57,5 @@ class GameJs(BaseModel):
             ),
             unculled_zones=UnculledZoneJs.from_game(game),
             map_zones=MapZonesJs.from_game(game),
-            live_units=LiveUnitJs.all_for(LiveStateContext.get(), game.theater),
+            live_units=LiveUnitJs.all_for(LiveStateContext.get(), game),
         )

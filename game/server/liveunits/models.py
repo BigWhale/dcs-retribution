@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from functools import cache
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from dcs import Point
 from dcs.planes import plane_map
@@ -28,8 +29,8 @@ from game.sidc import (
 )
 
 if TYPE_CHECKING:
+    from game import Game
     from game.companionlink.snapshot import LiveSnapshot, LiveUnit
-    from game.theater import ConflictTheater
 
 
 _IDENTITY_BY_SIDE = {
@@ -151,18 +152,27 @@ class LiveUnitJs(BaseModel):
     in_air: bool
     player: str | None
     sidc: str  # NATO symbol code (APP-6), see live_unit_sidc
+    # The launched flight (`Flight.id`) whose group this unit is in, if any.
+    flight_id: UUID | None
 
     class Config:
         title = "LiveUnit"
 
     @staticmethod
-    def all_for(
-        snapshot: LiveSnapshot | None, theater: ConflictTheater
-    ) -> list[LiveUnitJs]:
-        """Every unit of the snapshot with its position on the map; [] for None."""
+    def all_for(snapshot: LiveSnapshot | None, game: Game) -> list[LiveUnitJs]:
+        """Every unit of the snapshot with its position on the map and the
+        flight it was launched as (its group is that flight's
+        `live_group_name`, in either ATO); [] for None."""
         if snapshot is None:
             return []
-        terrain = theater.terrain
+        terrain = game.theater.terrain
+        flight_ids = {
+            flight.live_group_name: flight.id
+            for coalition in game.coalitions
+            for package in coalition.ato.packages
+            for flight in package.flights
+            if flight.live_group_name is not None
+        }
         return [
             LiveUnitJs(
                 name=u.name,
@@ -177,6 +187,7 @@ class LiveUnitJs(BaseModel):
                 in_air=u.in_air,
                 player=u.player,
                 sidc=str(live_unit_sidc(u)),
+                flight_id=flight_ids.get(u.group),
             )
             for u in snapshot.units
         ]
