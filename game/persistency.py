@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import pickle
 import shutil
 from pathlib import Path
@@ -418,6 +419,11 @@ def _autosave_path() -> str:
     return str(save_dir() / "autosave.retribution")
 
 
+def dynamic_autosave_path() -> Path:
+    """A dynamic campaign's rolling autosave, beside the manual saves."""
+    return save_dir() / "autosave_dynamic.retribution"
+
+
 def mission_path_for(name: str) -> Path:
     return base_path() / "Missions" / name
 
@@ -465,6 +471,8 @@ def autosave(game: Game) -> bool:
     :param game: Game to save
     :return: True if saved successfully
     """
+    if game.dynamic_campaign:
+        return _autosave_dynamic(game)
     try:
         with open(_autosave_path(), "wb") as f:
             data = _unload_static_data(game)
@@ -473,4 +481,25 @@ def autosave(game: Game) -> bool:
         return True
     except Exception:
         logging.exception("Could not save game")
+        return False
+
+
+def _autosave_dynamic(game: Game) -> bool:
+    """Writes the dynamic campaign's autosave whole or not at all: through a
+    temporary file replacing the previous autosave, so one cut short leaves
+    the previous whole."""
+    path = dynamic_autosave_path()
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        with open(temporary, "wb") as f:
+            data = _unload_static_data(game)
+            try:
+                pickle.dump(game, f)
+            finally:
+                _restore_static_data(game, data)
+        os.replace(temporary, path)
+        return True
+    except Exception:
+        logging.exception("Could not autosave the game to %s", path)
+        temporary.unlink(missing_ok=True)
         return False

@@ -43,6 +43,7 @@ from qt_ui import (  # noqa: E402
 )
 from qt_ui.companionlinkcontroller import CompanionLinkController  # noqa: E402
 from qt_ui.dialogs import Dialog  # noqa: E402
+from qt_ui.dynamicautosave import DynamicAutosave  # noqa: E402
 from qt_ui.flightlauncher import FlightLauncher  # noqa: E402
 from qt_ui.livelosses import LiveLosses  # noqa: E402
 from qt_ui.models import GameModel, PackageModel  # noqa: E402
@@ -63,6 +64,7 @@ from tests.conftest import (  # noqa: E402
 CAMPAIGN = Path("resources/campaigns/golan_heights_lite.yaml")
 DEADLINE = 5.0
 BATCH_LINE = re.compile(r"Live losses: \d+ entries, ")
+AUTOSAVE_LINE = re.compile(r"Autosave: (.+) in \d+ ms")
 
 
 @pytest.fixture(scope="module")
@@ -414,6 +416,7 @@ def test_sent_flight_losses_applied_before_confirmed(
         launcher.launch_now(flight)
         w.wait_for(lambda: len(commands.requests) == 1)
         assert launcher.is_busy(flight) and not flight.launched
+        assert launcher.launching
         sent = commands.requests[0][0]["group"]["units"]
         names = [u["name"] for u in sent.values()]
         assert game.live.name_map.flight_units(flight) == names
@@ -696,7 +699,74 @@ def test_launcher_refuses_foreign_mission(
         )
         assert said in [r.getMessage() for r in caplog.records]
         assert not launcher.is_busy(flight) and not flight.launched
+        assert not launcher.launching
         assert game.live.name_map.flight_units(flight) == []
         assert commands.requests == []
     finally:
         launcher.stop()
+
+
+def test_autosave_every_ten_minutes(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[[FakeCompanion], Window],
+    game: Game,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+
+    gate = threading.Event()
+    fake = serve(
+        [
+            event("state", state(game, 3)),
+            gate,
+            event("state", state(game, 4, boot="b2", own=False)),
+        ]
+    )
+    w = window(fake)
+    now = [1000.0]
+    busy = [False]
+    autosave = DynamicAutosave(w.link, lambda: busy[0], clock=lambda: now[0])
+    autosave.set_game(game)
+    path = persistency.dynamic_autosave_path()
+
+    def at(seconds: float) -> bool:
+        """The timer's check `seconds` after the game was set; whether the
+        autosave is there."""
+        now[0] = 1000.0 + seconds
+        autosave.check()
+        return path.exists()
+
+    def autosave_lines() -> list[str]:
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if AUTOSAVE_LINE.fullmatch(r.getMessage())
+        ]
+
+    try:
+        w.wait_for(lambda: following(game) and game.live.cursor == 0)
+        # Live losses autosaved the first cursor; the timer's are checked here.
+        path.unlink(missing_ok=True)
+
+        assert not at(599)
+        busy[0] = True
+        assert not at(600), "a flight is launching"
+        busy[0] = False
+        assert not at(659)
+        assert at(660)
+
+        saved = persistency.load_game(str(path))
+        assert saved is not None and saved.dynamic_campaign
+        assert saved.live.marker == game.live.marker
+        assert saved.live.tick is not None and saved.live.tick.minute == 3
+        [line] = autosave_lines()
+        match = AUTOSAVE_LINE.fullmatch(line)
+        assert match is not None and match.group(1) == str(path)
+
+        gate.set()
+        w.wait_for(lambda: not following(game))
+        path.unlink()
+        assert not at(1300), "another mission is running"
+        assert len(autosave_lines()) == 1
+    finally:
+        autosave.set_game(None)

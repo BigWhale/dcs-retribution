@@ -32,6 +32,7 @@ from game.theater.controlpoint import motorpools_inside_capture_zone
 from qt_ui import liberation_install
 from qt_ui.companionlinkcontroller import CompanionLinkController
 from qt_ui.dialogs import Dialog
+from qt_ui.dynamicautosave import DynamicAutosave
 from qt_ui.flightlauncher import FlightLauncher
 from qt_ui.livelosses import LiveLosses
 from qt_ui.models import GameModel
@@ -92,6 +93,9 @@ class QLiberationWindow(QMainWindow):
         self.flight_launcher = FlightLauncher(self.companion_link, self)
         self.flight_launcher.launch_failed.connect(self.on_launch_failed)
         self.live_losses = LiveLosses(self.companion_link, self)
+        self.dynamic_autosave = DynamicAutosave(
+            self.companion_link, lambda: self.flight_launcher.launching, self
+        )
         self.ato_panel = QAirTaskingOrderPanel(self.game_model, self.flight_launcher)
         # Each snapshot moves the mission clock: the lists' times are dated
         # against it.
@@ -512,6 +516,7 @@ class QLiberationWindow(QMainWindow):
             self.companion_link.set_game(game)
             self.flight_launcher.set_game(game)
             self.live_losses.set_game(self.game_model)
+            self.dynamic_autosave.set_game(game)
         except AttributeError:
             logging.exception("Incompatible save game")
             QMessageBox.critical(

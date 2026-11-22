@@ -70,7 +70,7 @@ def test_dynamic_campaign_loaded_keeps_held_aircraft_and_pilots(
     game.blue.ato.remove_package(first.package)
     game.pass_turn(no_action=True)  # autosaves
 
-    loaded = persistency.load_game(str(persistency.save_dir() / "autosave.retribution"))
+    loaded = persistency.load_game(str(persistency.dynamic_autosave_path()))
     assert loaded is not None
     Migrator(loaded, is_liberation=False)
 

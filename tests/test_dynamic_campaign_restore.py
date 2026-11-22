@@ -187,3 +187,45 @@ def test_slice_one_save_loads_without_tick(game: Game, tmp_path: Path) -> None:
     assert record.decide(own) is MissionVerdict.OWN
     assert record.keep(own)
     assert record.tick is not None and record.tick.minute == 2
+
+
+def test_dynamic_autosave_is_atomic(
+    game: Game, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = persistency.dynamic_autosave_path()
+    assert path == persistency.save_dir() / "autosave_dynamic.retribution"
+    temporary = path.with_name("autosave_dynamic.retribution.tmp")
+    first = taken(envelope(game, "b1", 7))
+    game.live.decide(first)
+    assert game.live.keep(first)
+    assert persistency.autosave(game)
+
+    later = taken(envelope(game, "b1", 8))
+    game.live.decide(later)
+    assert game.live.keep(later)
+    landmap = game.theater.landmap
+
+    def disk_full(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pickle, "dump", disk_full)
+    assert not persistency.autosave(game)
+    monkeypatch.undo()
+
+    assert any(r.exc_info is not None for r in caplog.records)
+    assert not temporary.exists()
+    assert game.theater.landmap is landmap
+    kept = persistency.load_game(str(path))
+    assert kept is not None and kept.live.tick is not None
+    assert kept.live.tick.minute == 7, "the previous autosave is whole"
+
+    # A normal campaign autosaves as before; the dynamic file is left alone.
+    normal = persistency.save_dir() / "autosave.retribution"
+    normal.unlink(missing_ok=True)
+    game.dynamic_campaign = False
+    assert persistency.autosave(game)
+    saved = persistency.load_game(str(normal))
+    assert saved is not None and not saved.dynamic_campaign
+    unchanged = persistency.load_game(str(path))
+    assert unchanged is not None and unchanged.live.tick is not None
+    assert unchanged.live.tick.minute == 7

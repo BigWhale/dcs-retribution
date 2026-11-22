@@ -229,6 +229,11 @@ class FlightLauncher(QObject):
         """Whether the flight is on its way to the live mission."""
         return flight in self._in_progress
 
+    @property
+    def launching(self) -> bool:
+        """Whether any flight is on its way to the live mission."""
+        return bool(self._in_progress)
+
     def launch_now(self, flight: Flight) -> None:
         """Launches the flight now, through the same path as the check.
 
