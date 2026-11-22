@@ -2,13 +2,23 @@
 
 The thread asks the companion's data port `GET /v1/hello`, then holds
 `GET /v1/stream` open (Server-Sent Events) and hands every `state` event to
-`on_snapshot` as a `LiveSnapshot`. `mission` events are logged; any other
-event is ignored. Whatever goes wrong (the companion not there, a refused
-token, a dropped or silent stream, a bad event) is logged once per kind until
-a snapshot comes again and tried again `retry` seconds later: the thread only
-ends on `stop()`.
+`on_snapshot` as a `LiveSnapshot`. `mission` events are logged; `events`
+events read the event log (below); any other event is ignored.
 
-Both callbacks run on this thread; a Qt caller turns them into queued signals
+With `on_events`, the link also reads the companion's event log: after each
+hello and on each `events` event of the stream it asks `GET /v1/events` from
+the newest seq it handed over (`events_after` at first) until it has the
+log's `lastSeq`, a page of at most `EVENTS_PAGE` entries at a time, and hands
+each page to `on_events` as an `EventBatch`. Without `events_after` it starts
+at the first hello's `lastSeq`, with an empty batch, so the log's history is
+never read. Its cursor outlives a connection, so a reconnect misses nothing.
+
+Whatever goes wrong (the companion not there, a refused token, a dropped or
+silent stream, a bad event, a failed read of the log) is logged once per kind
+until a snapshot comes again and tried again `retry` seconds later: the
+thread only ends on `stop()`.
+
+The callbacks run on this thread; a Qt caller turns them into queued signals
 and must not block on the GUI thread inside them (`stop()` waits for a
 callback that is running).
 """
@@ -23,6 +33,7 @@ from typing import Any, Callable, Iterable, Iterator, Optional, TypeVar
 
 import httpx
 
+from game.companionlink.eventlog import EventBatch, parse_events_page
 from game.companionlink.snapshot import LiveSnapshot, parse_snapshot
 
 log = logging.getLogger("game.companionlink")
@@ -34,6 +45,8 @@ STOP_WAIT = 2.0
 #: Connect, write and pool timeout of every request; the stream's read
 #: timeout is the link's own `read_timeout`.
 CONNECT_TIMEOUT = 5.0
+#: Entries asked per `GET /v1/events` (the companion's most).
+EVENTS_PAGE = 5000
 
 T = TypeVar("T")
 
@@ -63,6 +76,8 @@ class CompanionLink(threading.Thread):
         on_status: Callable[[LinkStatus], None],
         retry: float = 5.0,
         read_timeout: float = 90.0,
+        on_events: Optional[Callable[[EventBatch], None]] = None,
+        events_after: Optional[int] = None,
     ) -> None:
         super().__init__(name="CompanionLink", daemon=True)
         self._address = address.rstrip("/")
@@ -71,6 +86,11 @@ class CompanionLink(threading.Thread):
         self._on_status = on_status
         self._retry = retry
         self._read_timeout = read_timeout
+        self._on_events = on_events
+        # The newest seq handed to on_events; None until the first hello.
+        self._after: Optional[int] = events_after
+        # The last hello's lastSeq, when it had one.
+        self._hello_last: Optional[int] = None
         self._halt = threading.Event()
         # Guards _halted and _sock, and holds a callback while it runs, so
         # none starts once stop() has set _halted.
@@ -141,6 +161,7 @@ class CompanionLink(threading.Thread):
             hello = client.get(f"{self._address}/v1/hello")
             self._check(hello, "hello")
             self._hello(hello)
+            self._fetch_events(client)
             with client.stream(
                 "GET",
                 f"{self._address}/v1/stream",
@@ -152,7 +173,7 @@ class CompanionLink(threading.Thread):
                     if self._halt.is_set():
                         return
                     self._set_status(LinkStatus.LINKED)
-                    self._read(resp.iter_bytes())
+                    self._read(resp.iter_bytes(), client)
                 finally:
                     with self._lock:
                         self._sock = None
@@ -188,6 +209,10 @@ class CompanionLink(threading.Thread):
             hello.get("boot"),
             hello.get("session"),
         )
+        last = hello.get("lastSeq")
+        self._hello_last = (
+            last if isinstance(last, int) and not isinstance(last, bool) else None
+        )
         if hello.get("protocol") != PROTOCOL:
             self._once(
                 "protocol",
@@ -208,7 +233,53 @@ class CompanionLink(threading.Thread):
             except OSError:
                 pass
 
-    def _read(self, chunks: Iterable[bytes]) -> None:
+    def _fetch_events(self, client: httpx.Client) -> None:
+        """Reads the event log from the cursor to its lastSeq; a failure
+        raises, and the next connection reads again from the cursor."""
+        if self._on_events is None:
+            return
+        if self._after is None:
+            if self._hello_last is None:
+                self._once("no lastSeq", "the companion's hello has no lastSeq")
+                return
+            if self._deliver(self._on_events, EventBatch((), self._hello_last)):
+                self._after = self._hello_last
+                log.info("companion events: a new cursor at %d", self._after)
+            return
+        while not self._halt.is_set():
+            resp = client.get(
+                f"{self._address}/v1/events",
+                params={"after": self._after, "limit": EVENTS_PAGE},
+            )
+            self._check(resp, "events")
+            try:
+                page = parse_events_page(resp.text)
+            except ValueError as e:
+                raise _Failure(
+                    "events", f"the companion's events are bad: {e}", LinkStatus.WAITING
+                )
+            if page.skipped:
+                self._once(
+                    "bad entry",
+                    f"companion events: {page.skipped} entries after "
+                    f"{self._after} skipped",
+                )
+            if not page.entries:
+                return
+            through = page.entries[-1].seq
+            log.debug(
+                "companion events: %d entries through %d (log at %d)",
+                len(page.entries),
+                through,
+                page.last_seq,
+            )
+            if not self._deliver(self._on_events, EventBatch(page.entries, through)):
+                return
+            self._after = through
+            if through >= page.last_seq:
+                return
+
+    def _read(self, chunks: Iterable[bytes], client: httpx.Client) -> None:
         """Dispatches each event of the stream at its blank line."""
         kind = ""
         data: list[bytes] = []
@@ -217,7 +288,7 @@ class CompanionLink(threading.Thread):
                 return
             if not line:
                 if data:
-                    self._dispatch(kind, b"\n".join(data))
+                    self._dispatch(kind, b"\n".join(data), client)
                 kind, data = "", []
                 continue
             if line.startswith(b":"):
@@ -230,7 +301,7 @@ class CompanionLink(threading.Thread):
             elif field == b"data":
                 data.append(value)
 
-    def _dispatch(self, kind: str, raw: bytes) -> None:
+    def _dispatch(self, kind: str, raw: bytes, client: httpx.Client) -> None:
         if kind == "state":
             try:
                 snap = parse_snapshot(raw.decode("utf-8"))
@@ -247,6 +318,9 @@ class CompanionLink(threading.Thread):
             self._failures.clear()
             self._set_status(LinkStatus.RECEIVING)
             self._deliver(self._on_snapshot, snap)
+        elif kind == "events":
+            log.debug("companion events: %s", raw.decode("utf-8", errors="replace"))
+            self._fetch_events(client)
         elif kind == "mission":
             log.info(
                 "companion mission: %s", raw.decode("utf-8", errors="replace")[:200]
