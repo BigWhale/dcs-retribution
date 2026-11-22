@@ -31,6 +31,16 @@ spots and spares are claimed (`ParkingClaims`) before the worker starts and
 held while the launch is on its way and a snapshot's age after, so a second
 launch at the field takes others.
 
+The group's name is one the mission does not use: not in the snapshot, not
+sent into this mission by this launcher, and not held by the companion (a
+spawn of its mission `waiting`, `unknown` or `spawned`, even one whose group
+is gone; the companion refuses the name). The held names are asked for on the
+GUI thread at each launch (`GET /v1/spawns`, a local call of milliseconds, cut
+short after `HELD_TIMEOUT_S`), so they are fresh whoever spawned them: an
+earlier campaign in the same mission, or this one before Retribution was
+restarted. When they cannot be had, the launch goes on without them (logged
+once until they can again). A group the companion holds is never a spare.
+
 Each flight is launched at most once at a time; several flights may be on
 their way at once. The ids, names and parking claims handed out belong to one
 mission (the snapshot's boot and session) and start afresh with a new mission.
@@ -89,6 +99,9 @@ CONFIRM_POLL_S = 0.5
 #: between snapshots is a wall-clock estimate, and a snapshot taken before the
 #: spawn landed must not free them.
 CLAIM_AHEAD_S = 60.0
+#: How long a launch waits for the companion's held names, in seconds; the
+#: GUI thread waits on it.
+HELD_TIMEOUT_S = 2.0
 
 
 def flight_locked(flight: Flight, launcher: Optional[FlightLauncher] = None) -> bool:
@@ -154,6 +167,8 @@ class FlightLauncher(QObject):
         self._ids = IdAllocator()
         self._sent_names: set[str] = set()
         self._parking = ParkingClaims()
+        # Whether the held names could not be had at the last ask (logged).
+        self._held_failed = False
         self._timer = QTimer(self)
         self._timer.setInterval(CHECK_INTERVAL_MS)
         # (PySide6 6.4's stub lacks the signal.)
@@ -253,8 +268,9 @@ class FlightLauncher(QObject):
         if mission != self._mission:
             self._forget_mission()
             self._mission = mission
+        held = self._held_names()
         try:
-            start_type, plan = self._plan_start(game, flight, snapshot)
+            start_type, plan = self._plan_start(game, flight, snapshot, held)
             table, country, category = generate_flight_table(
                 game,
                 flight,
@@ -270,6 +286,7 @@ class FlightLauncher(QObject):
                 ids=self._ids,
                 sent_names=self._sent_names,
                 model_time=model_time,
+                held_names=held,
             )
         except Exception as e:
             log.warning("Launch: %s could not be generated", flight, exc_info=True)
@@ -462,8 +479,32 @@ class FlightLauncher(QObject):
         self._sent_names = set()
         self._parking = ParkingClaims()
 
+    def _held_names(self) -> frozenset[str]:
+        """The names the companion holds in its mission, or none when it
+        cannot be asked: the launch goes on, and may be refused (`409`)."""
+        commands = CompanionCommands(
+            liberation_install.companion_command_address(),
+            liberation_install.companion_command_token(),
+            timeout=HELD_TIMEOUT_S,
+        )
+        try:
+            held = commands.held_names()
+        except Exception as e:
+            if not self._held_failed:
+                log.warning(
+                    "Launch: the companion's held group names cannot be had "
+                    "(%s); choosing names from the snapshot only",
+                    _text(e),
+                )
+            self._held_failed = True
+            return frozenset()
+        if self._held_failed:
+            log.info("Launch: the companion's held group names can be had again")
+        self._held_failed = False
+        return held
+
     def _plan_start(
-        self, game: Game, flight: Flight, snapshot: LiveSnapshot
+        self, game: Game, flight: Flight, snapshot: LiveSnapshot, held: frozenset[str]
     ) -> tuple[StartType, Optional[ParkingPlan]]:
         """The start type the flight is generated with, and its spots.
 
@@ -483,7 +524,7 @@ class FlightLauncher(QObject):
             flight.count,
             flight.coalition.coalition_id,
             snapshot,
-            self._not_spares(game),
+            self._not_spares(game) | held,
             self._parking,
         )
         if plan is None:
@@ -498,7 +539,8 @@ class FlightLauncher(QObject):
 
     def _not_spares(self, game: Game) -> set[str]:
         """The groups never despawned for a launch: those sent into this
-        mission and every flight's live group, of both ATOs."""
+        mission and every flight's live group, of both ATOs. (The names the
+        companion holds are added by the caller.)"""
         names = set(self._sent_names)
         for ato in (game.blue.ato, game.red.ato):
             for package in ato.packages:

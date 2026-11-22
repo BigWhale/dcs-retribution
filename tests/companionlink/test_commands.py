@@ -1,9 +1,9 @@
 """The client of DCS Companion's command port, against a fake companion.
 
-The fake answers `POST /v1/spawn`, `GET /v1/spawns/{id}` and `POST /v1/despawn`
-from a real HTTP server on 127.0.0.1 as the companion does
-(`docs/reference/campaign.md`, Command port): `202 {"id":"s-1"}`, the spawn
-record under `spawn`, a despawn's `group` and `units`, errors as
+The fake answers `POST /v1/spawn`, `GET /v1/spawns`, `GET /v1/spawns/{id}` and
+`POST /v1/despawn` from a real HTTP server on 127.0.0.1 as the companion does
+(`docs/reference/campaign.md`, Command port): `202 {"id":"s-1"}`, the
+mission's spawns under `spawns`, the spawn record under `spawn`, a despawn's `group` and `units`, errors as
 `{"error": "..."}` and a wrong token `401`.
 """
 
@@ -55,6 +55,10 @@ class FakeCommands:
         self.despawn_refuse: Optional[int] = None
         #: The bodies and headers of POST /v1/despawn, in order.
         self.despawns: list[tuple[dict[str, Any], dict[str, str]]] = []
+        #: The spawns GET /v1/spawns lists, as (name, status).
+        self.spawns: list[tuple[str, str]] = []
+        #: The headers of GET /v1/spawns, in order.
+        self.lists: list[dict[str, str]] = []
         self.server: Optional[ThreadingHTTPServer] = None
         self.thread: Optional[threading.Thread] = None
 
@@ -92,6 +96,9 @@ class FakeCommands:
             def do_GET(self) -> None:
                 if not self.authorized():
                     return
+                if self.path == "/v1/spawns":
+                    self.list_spawns()
+                    return
                 if self.path != "/v1/spawns/s-1":
                     self.answer(404, {"error": "no spawn s-2"})
                     return
@@ -118,6 +125,26 @@ class FakeCommands:
                 self.answer(
                     200,
                     {"boot": "b1", "session": 1, "modelTime": 2401.2, "spawn": spawn},
+                )
+
+            def list_spawns(self) -> None:
+                with fake.lock:
+                    fake.lists.append(dict(self.headers))
+                    spawns = [
+                        {
+                            "id": f"s-{i}",
+                            "name": name,
+                            "country": 2,
+                            "category": "plane",
+                            "mission": {"boot": "b1", "session": 1},
+                            "status": status,
+                            "asked": "2026-11-22T09:14:00.000Z",
+                        }
+                        for i, (name, status) in enumerate(fake.spawns, start=1)
+                    ]
+                self.answer(
+                    200,
+                    {"boot": "b1", "session": 1, "modelTime": 2401.2, "spawns": spawns},
                 )
 
             def despawn(self, body: dict[str, Any]) -> None:
@@ -326,3 +353,39 @@ def test_despawn_failure_stops_before_spawn(
     assert [body["name"] for body, _ in fake.despawns] == ["Spare 1"] * 3
     assert fake.requests == []
     assert TOKEN not in caplog.text
+
+
+def test_held_names_round_trip(fake: FakeCommands) -> None:
+    """The names the companion holds: its spawns waiting, unknown or spawned."""
+    fake.spawns = [
+        ("Uzi 1", "spawned"),
+        ("Uzi 2", "waiting"),
+        ("Uzi 3", "unknown"),
+        ("Uzi 4", "failed"),
+        ("Uzi 5", "despawned"),
+    ]
+
+    held = CompanionCommands(fake.address, TOKEN).held_names()
+
+    assert held == frozenset({"Uzi 1", "Uzi 2", "Uzi 3"})
+    assert len(fake.lists) == 1
+    assert fake.lists[0]["Authorization"] == f"Bearer {TOKEN}"
+
+
+def test_spawn_refused_after_despawn_says_so(fake: FakeCommands) -> None:
+    """The spares are gone when the spawn is refused: the text says so."""
+    fake.groups = {"Spare 1": 1, "Spare 2": 1}
+    fake.refuse = (409, "the name is held by s-10 (spawned)")
+
+    with pytest.raises(CommandError) as refused:
+        despawn_and_spawn(
+            CompanionCommands(fake.address, TOKEN), ["Spare 1", "Spare 2"], request()
+        )
+
+    assert refused.value.status == 409
+    assert str(refused.value) == (
+        "spawn of 'LINK 1' failed: the companion answered 409: "
+        "the name is held by s-10 (spawned); "
+        "the parked spares 'Spare 1', 'Spare 2' were despawned for it"
+    )
+    assert fake.groups == {}

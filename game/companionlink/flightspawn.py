@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 import tempfile
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -175,14 +175,17 @@ def prepare_spawn(
     ids: IdAllocator,
     sent_names: set[str],
     model_time: float,
+    held_names: Collection[str] = frozenset(),
 ) -> SpawnRequest:
     """The spawn request for a generated group table, at once (no `at`).
 
     The table is copied, never changed. In the copy:
     - the group and its units get new ids (`ids`); references to the group's
       own id and its units' ids follow them, references to anything else stay;
-    - the group gets a name used neither by the snapshot nor by `sent_names`
-      (Retribution's `<n>` raised until the name and its unit names are free),
+    - the group gets a name used neither by the snapshot, nor by `sent_names`,
+      nor by `held_names` (the names the companion's spawns hold, which it
+      refuses to spawn again even when the group is gone from the mission;
+      Retribution's `<n>` raised until the name and its unit names are free),
       in every string that named it; the name is added to `sent_names`;
     - a Client or Player skill becomes an AI skill;
     - every waypoint ETA and every task condition's time move by `model_time`,
@@ -207,7 +210,7 @@ def prepare_spawn(
     name = _free_name(
         old_name,
         [u["name"] for u in units],
-        snapshot.names | sent_names,
+        snapshot.names | sent_names | frozenset(held_names),
     )
     if name != old_name:
 

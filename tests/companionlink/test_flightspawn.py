@@ -70,6 +70,7 @@ def spawn(
     ids: IdAllocator,
     sent: set[str],
     model_time: float = 1000.0,
+    held: frozenset[str] = frozenset(),
 ) -> Any:
     return prepare_spawn(
         table,
@@ -78,6 +79,7 @@ def spawn(
         snapshot=snap,
         ids=ids,
         sent_names=sent,
+        held_names=held,
         model_time=model_time,
     )
 
@@ -146,6 +148,16 @@ def test_name_taken_picks_next_number() -> None:
     ]
     assert request.name in sent
     assert spawn(make_table(), snap, ids, sent).name == "Uzi 1|2|3|F-16C_50|"
+
+
+def test_name_held_by_the_companion_picks_next_number() -> None:
+    """A name the companion's spawns hold is taken, though not in the snapshot."""
+    request = spawn(
+        make_table(), snapshot(), IdAllocator(), set(), held=frozenset({NAME})
+    )
+
+    assert request.name == "Uzi 1|2|2|F-16C_50|"
+    assert request.group["name"] == request.name
 
 
 def test_skill_and_times() -> None:

@@ -2,8 +2,10 @@
 
 `POST /v1/spawn` asks the companion to spawn a group (its pydcs table) now or
 at a model time; the companion answers `202 {"id":"s-1"}` and spawns it when
-it is due. `GET /v1/spawns/{id}` gives the spawn's record, whose `status`
-tells what became of it. `POST /v1/despawn` removes a group of the mission
+it is due, or `409` when a spawn of the mission still holds the name.
+`GET /v1/spawns` lists the mission's spawns (whose names are held while one is
+`waiting`, `unknown` or `spawned`), `GET /v1/spawns/{id}` gives one spawn's
+record, whose `status` tells what became of it. `POST /v1/despawn` removes a group of the mission
 now (`200` with its `units`, `404` when there is no such group). Errors come as `{"error": "..."}` with a fitting
 status; a wrong token is `401`.
 
@@ -25,6 +27,9 @@ log = logging.getLogger("game.companionlink")
 
 #: A spawn's statuses that are final and not `spawned`.
 _FINAL_FAILED = ("failed", "despawned")
+#: A spawn's statuses that hold its name in the mission: the companion
+#: refuses another spawn of that name (`409`).
+_HOLDING = ("waiting", "unknown", "spawned")
 
 
 @dataclass(frozen=True)
@@ -59,15 +64,19 @@ class CommandError(Exception):
         self.message = message
         #: The step of a launch that failed (`despawn of 'Spare 1'`), if set.
         self.step: Optional[str] = None
+        #: What the launch had done before the step failed, if anything.
+        self.done: Optional[str] = None
 
     def __str__(self) -> str:
         if self.status is None:
             text = self.message
         else:
             text = f"the companion answered {self.status}: {self.message}"
-        if self.step is None:
-            return text
-        return f"{self.step} failed: {text}"
+        if self.step is not None:
+            text = f"{self.step} failed: {text}"
+        if self.done is not None:
+            text = f"{text}; {self.done}"
+        return text
 
 
 class SpawnFailed(CommandError):
@@ -136,6 +145,28 @@ class CompanionCommands:
             raise CommandError(resp.status_code, "the despawn answer has no units")
         log.info("companion despawned: %r, %d units", name, units)
         return units
+
+    def held_names(self) -> frozenset[str]:
+        """The group names the companion holds in its mission: those of its
+        spawns `waiting`, `unknown` or `spawned` (`GET /v1/spawns`).
+
+        A spawn of one of them is refused (`409`), even when no group of that
+        name is in the mission any more. Raises CommandError when the
+        companion cannot be asked or refuses.
+        """
+        resp = self._send("GET", "/v1/spawns")
+        if resp.status_code != 200:
+            raise self._refusal(resp, quiet=True)
+        spawns = self._json(resp).get("spawns")
+        if not isinstance(spawns, list):
+            raise CommandError(resp.status_code, "the spawns answer has no spawns")
+        return frozenset(
+            s["name"]
+            for s in spawns
+            if isinstance(s, dict)
+            and s.get("status") in _HOLDING
+            and isinstance(s.get("name"), str)
+        )
 
     def spawn_status(self, spawn_id: str) -> str:
         """The spawn's status: waiting, unknown, spawned, failed or despawned."""
@@ -255,7 +286,9 @@ def despawn_and_spawn(
     plane that may still stand there.
 
     The error says which step failed: `despawn of 'Spare 1' failed: ...` or
-    `spawn of 'Uzi 1' failed: ...`.
+    `spawn of 'Uzi 1' failed: ...`, and which spares are gone already when
+    the spawn failed after them (`...; the parked spares 'Spare 1' were
+    despawned for it`).
     """
     for name in despawn:
         try:
@@ -267,4 +300,7 @@ def despawn_and_spawn(
         return commands.spawn(request)
     except CommandError as e:
         e.step = f"spawn of {request.name!r}"
+        if despawn:
+            spares = ", ".join(repr(n) for n in despawn)
+            e.done = f"the parked spares {spares} were despawned for it"
         raise
