@@ -275,6 +275,8 @@ class QPackageDialog(QDialog):
     def date_time_edit(self, on_edited: Callable[[QDateTime], None]) -> QDateTimeEdit:
         """A dynamic campaign's time field: date and time, in mission time."""
         edit = QDateTimeEdit()
+        # The theme greys it out when disabled (style-dcs.css).
+        edit.setProperty("style", "campaign-time")
         edit.setTimeSpec(Qt.TimeSpec.UTC)
         edit.setDisplayFormat("dd MMM HH:mm")
         # Only a finished edit counts: no half-typed time moves the package.

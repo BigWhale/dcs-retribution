@@ -456,6 +456,13 @@ QComboBox:disabled, QComboBox::drop-down:disabled{
     background: #435466;
 }
 
+/* A dynamic campaign's Start time and TOT fields (the package dialog): the
+   QWidget rule above draws them the same enabled or not. */
+QDateTimeEdit[style="campaign-time"]:disabled {
+    color: #B7C0C6;
+    background: #435466;
+}
+
 QComboBox::drop-down {
     subcontrol-origin: padding;
     subcontrol-position: top right;
