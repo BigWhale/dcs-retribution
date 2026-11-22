@@ -7,27 +7,58 @@ never reach the log.
 
 from __future__ import annotations
 
+import importlib
 import logging
+import pkgutil
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Iterator
 
 import pytest
 
-import game.companionlink.link  # noqa: F401  (creates its logger on import)
-import qt_ui.companionlinkcontroller  # noqa: F401
-import qt_ui.flightlauncher  # noqa: F401
-import qt_ui.livelosses  # noqa: F401
+import game.companionlink
+import qt_ui
 from game.logging_config import init_logging
 
 REPO = Path(__file__).resolve().parent.parent
 
-#: The loggers the dynamic campaign's modules create on import.
-LOGGERS = [
-    "game.companionlink",
-    "qt_ui.companionlinkcontroller",
-    "qt_ui.flightlauncher",
-    "qt_ui.livelosses",
+
+def modules(package: ModuleType) -> list[ModuleType]:
+    """Every module of the package, imported."""
+    return [
+        importlib.import_module(info.name)
+        for info in pkgutil.walk_packages(package.__path__, package.__name__ + ".")
+    ]
+
+
+def uses_the_link(module: ModuleType) -> bool:
+    """Whether the module takes anything from `game.companionlink`."""
+    for value in vars(module).values():
+        source = (
+            value.__name__
+            if isinstance(value, ModuleType)
+            else getattr(value, "__module__", None)
+        )
+        if isinstance(source, str) and source.startswith("game.companionlink"):
+            return True
+    return False
+
+
+#: The live campaign's modules: the link's package and the GUI modules that
+#: use it.
+LIVE_MODULES = [game.companionlink, *modules(game.companionlink)] + [
+    m for m in modules(qt_ui) if uses_the_link(m)
 ]
+
+#: The loggers the live campaign's modules create on import.
+LOGGERS = sorted(
+    {
+        value.name
+        for module in LIVE_MODULES
+        for value in vars(module).values()
+        if isinstance(value, logging.Logger)
+    }
+)
 
 
 @pytest.fixture
@@ -66,6 +97,8 @@ def app_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pat
 
 
 def test_live_campaign_loggers_reach_the_log(app_logging: Path) -> None:
+    assert "game.companionlink" in LOGGERS
+    assert any(name.startswith("qt_ui.") for name in LOGGERS)
     for name in LOGGERS:
         logger = logging.getLogger(name)
         assert logger.disabled is False, name

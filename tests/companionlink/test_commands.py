@@ -1,21 +1,19 @@
 """The client of DCS Companion's command port, against a fake companion.
 
-The fake answers `POST /v1/spawn`, `GET /v1/spawns`, `GET /v1/spawns/{id}` and
-`POST /v1/despawn` from a real HTTP server on 127.0.0.1 as the companion does
-(`docs/reference/campaign.md`, Command port): `202 {"id":"s-1"}`, the
-mission's spawns under `spawns`, the spawn record under `spawn`, a despawn's `group` and `units`, errors as
+The fake (`FakeCommands`, in conftest) answers `POST /v1/spawn`,
+`GET /v1/spawns`, `GET /v1/spawns/{id}` and `POST /v1/despawn` from a real
+HTTP server on 127.0.0.1 as the companion does (`docs/reference/campaign.md`,
+Command port): `202 {"id":"s-1"}`, the mission's spawns under `spawns`, the
+spawn record under `spawn`, a despawn's `group` and `units`, errors as
 `{"error": "..."}` and a wrong token `401`.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import socket
-import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator
 
 import pytest
 
@@ -27,8 +25,8 @@ from game.companionlink.commands import (
     SpawnRequest,
     despawn_and_spawn,
 )
-
-TOKEN = "tok-c"
+from tests.conftest import COMMAND_TOKEN as TOKEN
+from tests.conftest import FakeCommands
 
 GROUP: dict[str, Any] = {
     "name": "LINK 1",
@@ -36,168 +34,6 @@ GROUP: dict[str, Any] = {
     "units": {"1": {"name": "LINK 1-1", "type": "F-16C_50", "skill": "High"}},
     "route": {"points": {}},
 }
-
-
-class FakeCommands:
-    """The companion's command port: spawn requests and their records."""
-
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.requests: list[tuple[dict[str, Any], dict[str, str]]] = []
-        #: The answer to the next POST /v1/spawn, or None for 202 s-1.
-        self.refuse: Optional[tuple[int, str]] = None
-        #: The statuses GET /v1/spawns/s-1 gives, in turn; the last repeats.
-        #: "http:503" answers that HTTP status with an error instead.
-        self.statuses: list[str] = []
-        #: The groups POST /v1/despawn removes, with their units; others 404.
-        self.groups: dict[str, int] = {}
-        #: The status every POST /v1/despawn answers with an error, or None.
-        self.despawn_refuse: Optional[int] = None
-        #: The bodies and headers of POST /v1/despawn, in order.
-        self.despawns: list[tuple[dict[str, Any], dict[str, str]]] = []
-        #: The spawns GET /v1/spawns lists, as (name, status).
-        self.spawns: list[tuple[str, str]] = []
-        #: The headers of GET /v1/spawns, in order.
-        self.lists: list[dict[str, str]] = []
-        self.server: Optional[ThreadingHTTPServer] = None
-        self.thread: Optional[threading.Thread] = None
-
-    def start(self) -> None:
-        fake = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, format: str, *args: Any) -> None:
-                pass
-
-            def authorized(self) -> bool:
-                if self.headers.get("Authorization") == f"Bearer {TOKEN}":
-                    return True
-                self.answer(401, {"error": "unauthorized"})
-                return False
-
-            def do_POST(self) -> None:
-                raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-                if not self.authorized():
-                    return
-                if self.path == "/v1/despawn":
-                    self.despawn(json.loads(raw))
-                    return
-                if self.path != "/v1/spawn":
-                    self.answer(404, {"error": "not found"})
-                    return
-                with fake.lock:
-                    fake.requests.append((json.loads(raw), dict(self.headers)))
-                    refuse = fake.refuse
-                if refuse is not None:
-                    self.answer(refuse[0], {"error": refuse[1]})
-                    return
-                self.answer(202, {"id": "s-1"})
-
-            def do_GET(self) -> None:
-                if not self.authorized():
-                    return
-                if self.path == "/v1/spawns":
-                    self.list_spawns()
-                    return
-                if self.path != "/v1/spawns/s-1":
-                    self.answer(404, {"error": "no spawn s-2"})
-                    return
-                with fake.lock:
-                    status = (
-                        fake.statuses.pop(0)
-                        if len(fake.statuses) > 1
-                        else fake.statuses[0]
-                    )
-                if status.startswith("http:"):
-                    self.answer(int(status[5:]), {"error": "not now"})
-                    return
-                spawn: dict[str, Any] = {
-                    "id": "s-1",
-                    "name": "LINK 1",
-                    "country": 2,
-                    "category": "plane",
-                    "mission": {"boot": "b1", "session": 1},
-                    "status": status,
-                    "asked": "2026-11-22T10:00:00.000Z",
-                }
-                if status == "failed":
-                    spawn["reason"] = "campaign_spawn: group name in use"
-                self.answer(
-                    200,
-                    {"boot": "b1", "session": 1, "modelTime": 2401.2, "spawn": spawn},
-                )
-
-            def list_spawns(self) -> None:
-                with fake.lock:
-                    fake.lists.append(dict(self.headers))
-                    spawns = [
-                        {
-                            "id": f"s-{i}",
-                            "name": name,
-                            "country": 2,
-                            "category": "plane",
-                            "mission": {"boot": "b1", "session": 1},
-                            "status": status,
-                            "asked": "2026-11-22T09:14:00.000Z",
-                        }
-                        for i, (name, status) in enumerate(fake.spawns, start=1)
-                    ]
-                self.answer(
-                    200,
-                    {"boot": "b1", "session": 1, "modelTime": 2401.2, "spawns": spawns},
-                )
-
-            def despawn(self, body: dict[str, Any]) -> None:
-                with fake.lock:
-                    fake.despawns.append((body, dict(self.headers)))
-                    refuse = fake.despawn_refuse
-                    name = str(body.get("name"))
-                    units = None if refuse else fake.groups.pop(name, None)
-                if refuse is not None:
-                    self.answer(refuse, {"error": "hook link down"})
-                    return
-                if units is None:
-                    self.answer(404, {"error": f"campaign_despawn: no group {name}"})
-                    return
-                self.answer(
-                    200,
-                    {
-                        "boot": "b1",
-                        "session": 1,
-                        "modelTime": 2410.5,
-                        "group": name,
-                        "units": units,
-                    },
-                )
-
-            def answer(self, status: int, body: dict[str, Any]) -> None:
-                raw = json.dumps(body).encode()
-                self.send_response(status)
-                if status == 401:
-                    self.send_header("WWW-Authenticate", "Bearer")
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(raw)))
-                self.end_headers()
-                self.wfile.write(raw)
-
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.server = server
-        self.thread = threading.Thread(
-            target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
-        )
-        self.thread.start()
-
-    @property
-    def address(self) -> str:
-        assert self.server is not None
-        return f"http://127.0.0.1:{self.server.server_address[1]}"
-
-    def close(self) -> None:
-        if self.server is not None:
-            self.server.shutdown()
-            self.server.server_close()
-        if self.thread is not None:
-            self.thread.join()
 
 
 @pytest.fixture

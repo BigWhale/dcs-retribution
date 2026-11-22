@@ -1,19 +1,26 @@
-"""When a flight of the ATO is due in the live mission, and the ATO kept.
+"""When a flight of the ATO is due in the live mission, the ATO kept, and
+the names a launched flight is mapped by.
 
 The games are stand-ins: a `dynamic_campaign` flag and the two ATOs, their
 packages holding flights that carry `launched` and a flight plan's
-`startup_time()`, with its `takeoff_time()` ten minutes later.
+`startup_time()`, with its `takeoff_time()` ten minutes later. A launched
+flight is a stand-in too: its roster's pilots and its airlift's cargo.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, Iterator, cast
+
+from dcs.unitgroup import FlyingGroup
 
 from game.ato.flight import Flight
 from game.coalition import Coalition
 from game.companionlink.launching import due_flights
+from game.companionlink.liveunitmap import LiveUnitMap
+from game.transfers import TransferOrder
+from game.unitmap import UnitMap
 
 
 def at(hhmm: str) -> datetime:
@@ -220,3 +227,53 @@ def test_dynamic_initialize_turn_keeps_ato() -> None:
     assert "air_wing.reset" in calls
     assert "air_wing.reset_keeping_ato" not in calls
     assert "plan_missions" in calls
+
+
+class FakeTransfer:
+    """An airlift's cargo: `size` units, in order."""
+
+    def __init__(self, size: int) -> None:
+        self.size = size
+        self.units = [SimpleNamespace(name=f"cargo {i}") for i in range(size)]
+
+    def iter_units(self) -> Iterator[Any]:
+        return iter(self.units)
+
+
+def launched(pilots: list[Any], cargo: FakeTransfer | None = None) -> Flight:
+    """A flight of the roster's pilots, carrying `cargo` if any."""
+    roster = SimpleNamespace(iter_pilots=lambda: iter(pilots))
+    return cast(Flight, SimpleNamespace(roster=roster, cargo=cargo))
+
+
+def test_add_launched_replaces_earlier_names() -> None:
+    """A flight launched again keeps only its newest names, its pilots in
+    roster order and an airlift's cargo split as a turn's mission splits it."""
+    lead, wing = SimpleNamespace(name="lead"), SimpleNamespace(name="wing")
+    flight = launched([lead, wing])
+    transfer = FakeTransfer(5)
+    airlift = launched([SimpleNamespace(name="crew 1"), None, None], transfer)
+    name_map = LiveUnitMap()
+
+    name_map.add_launched(flight, ["A 1", "A 2"])
+    name_map.add_launched(airlift, ["C 1", "C 2", "C 3"])
+    name_map.add_launched(flight, ["B 1", "B 2"])
+    name_map.add_launched(airlift, ["D 1", "D 2", "D 3"])
+
+    assert name_map.flight_units(flight) == ["B 1", "B 2"]
+    assert [name_map.aircraft[n].pilot for n in ("B 1", "B 2")] == [lead, wing]
+    assert name_map.flight_units(airlift) == ["D 1", "D 2", "D 3"]
+    assert set(name_map.aircraft) == {"B 1", "B 2", "D 1", "D 2", "D 3"}
+
+    # As `UnitMap.add_airlift_units` splits it for a group of the same names.
+    expected = UnitMap()
+    group = SimpleNamespace(units=[SimpleNamespace(name=f"D {i}") for i in (1, 2, 3)])
+    expected.add_airlift_units(
+        cast(FlyingGroup[Any], group), cast(TransferOrder, transfer)
+    )
+    assert name_map.airlifts == expected.airlifts
+    assert [len(name_map.airlifts[n].cargo) for n in ("D 1", "D 2", "D 3")] == [
+        2,
+        2,
+        1,
+    ]

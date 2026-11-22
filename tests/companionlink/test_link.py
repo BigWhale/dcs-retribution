@@ -1,9 +1,9 @@
 """The link to DCS Companion's snapshot stream, against a fake companion.
 
-The fake serves `GET /v1/hello`, `GET /v1/stream` and `GET /v1/events` from a
-real HTTP server on 127.0.0.1, one script per stream connection, with the
-field names of the companion's minute snapshots (the state spike's sample)
-and of its event log.
+The fake (`FakeCompanion`, in conftest) serves `GET /v1/hello`,
+`GET /v1/stream` and `GET /v1/events` from a real HTTP server on 127.0.0.1,
+one script per stream connection, with the field names of the companion's
+minute snapshots (the state spike's sample) and of its event log.
 """
 
 from __future__ import annotations
@@ -14,9 +14,7 @@ import socket
 import threading
 import time
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable, Iterator, Optional, Union
-from urllib.parse import parse_qs, urlsplit
+from typing import Any, Callable, Iterator, Optional
 
 import pytest
 
@@ -24,148 +22,7 @@ from game.companionlink.eventlog import EventBatch, LogPos, LogRef, parse_events
 from game.companionlink.link import CompanionLink
 from game.companionlink.linkstatus import LinkStatus
 from game.companionlink.snapshot import LiveSnapshot
-
-TOKEN = "tok-1"
-DEADLINE = 3.0
-
-#: Ends the stream connection that reads it.
-CLOSE = object()
-
-#: What a stream connection sends: event text, CLOSE, or an Event to wait for.
-Item = Union[str, object, threading.Event]
-
-
-class FakeCompanion:
-    """The companion's data port: hello, the stream (one script per stream
-    connection) and the event log's `entries`, recording each `after` and
-    `limit` asked."""
-
-    def __init__(self, scripts: Optional[list[list[Item]]] = None) -> None:
-        self.scripts: list[list[Item]] = scripts or []
-        self.entries: list[dict[str, Any]] = []
-        self.afters: list[int] = []
-        self.limits: list[int] = []
-        self.closing = threading.Event()
-        self.lock = threading.Lock()
-        self.streams = 0
-        self.refused = 0
-        #: How many hellos, from the first, leave out `lastSeq`.
-        self.hellos_without_last = 0
-        self.server: Optional[ThreadingHTTPServer] = None
-        self.thread: Optional[threading.Thread] = None
-
-    def start(self, port: int = 0) -> None:
-        fake = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, format: str, *args: Any) -> None:
-                pass
-
-            def do_GET(self) -> None:
-                if self.headers.get("Authorization") != f"Bearer {TOKEN}":
-                    with fake.lock:
-                        fake.refused += 1
-                    self.answer(401, {"error": "unauthorized"})
-                    return
-                url = urlsplit(self.path)
-                if url.path == "/v1/hello":
-                    hello: dict[str, Any] = {
-                        "protocol": 1,
-                        "boot": "b1",
-                        "session": 1,
-                        "modelTime": 5,
-                        "lastSeq": fake.last_seq(),
-                    }
-                    with fake.lock:
-                        if fake.hellos_without_last > 0:
-                            fake.hellos_without_last -= 1
-                            del hello["lastSeq"]
-                    self.answer(200, hello)
-                elif url.path == "/v1/events":
-                    query = parse_qs(url.query)
-                    after = int(query.get("after", ["0"])[0])
-                    limit = int(query.get("limit", ["500"])[0])
-                    with fake.lock:
-                        fake.afters.append(after)
-                        fake.limits.append(limit)
-                        page = [e for e in fake.entries if e["seq"] > after][:limit]
-                    self.answer(
-                        200,
-                        {
-                            "boot": "b1",
-                            "session": 1,
-                            "modelTime": 5,
-                            "lastSeq": fake.last_seq(),
-                            "entries": page,
-                        },
-                    )
-                elif url.path == "/v1/stream":
-                    with fake.lock:
-                        n = fake.streams
-                        fake.streams += 1
-                    script = fake.scripts[n] if n < len(fake.scripts) else []
-                    self.stream(script)
-                else:
-                    self.answer(404, {"error": "not found"})
-
-            def answer(self, status: int, body: dict[str, Any]) -> None:
-                raw = json.dumps(body).encode()
-                self.send_response(status)
-                if status == 401:
-                    self.send_header("WWW-Authenticate", "Bearer")
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(raw)))
-                self.end_headers()
-                self.wfile.write(raw)
-
-            def stream(self, script: list[Item]) -> None:
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.end_headers()
-                try:
-                    for item in script:
-                        if item is CLOSE:
-                            return
-                        if isinstance(item, threading.Event):
-                            while not item.wait(0.02):
-                                if fake.closing.is_set():
-                                    return
-                            continue
-                        assert isinstance(item, str)
-                        self.wfile.write(item.encode())
-                        self.wfile.flush()
-                    fake.closing.wait()
-                except OSError:
-                    pass
-
-        server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-        server.daemon_threads = False
-        self.server = server
-        self.thread = threading.Thread(
-            target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
-        )
-        self.thread.start()
-
-    def last_seq(self) -> int:
-        with self.lock:
-            return self.entries[-1]["seq"] if self.entries else 0
-
-    def add(self, *seqs: int) -> None:
-        with self.lock:
-            self.entries.extend(entry(n) for n in seqs)
-
-    @property
-    def address(self) -> str:
-        assert self.server is not None
-        return f"http://127.0.0.1:{self.server.server_address[1]}"
-
-    def close(self) -> None:
-        self.closing.set()
-        if self.server is not None:
-            self.server.shutdown()
-            self.server.server_close()
-        if self.thread is not None:
-            self.thread.join()
+from tests.conftest import CLOSE, TOKEN, entry, event, wait_until
 
 
 class Recorder:
@@ -188,34 +45,6 @@ class Recorder:
 
     def on_status(self, status: LinkStatus) -> None:
         self.statuses.append(status)
-
-
-def wait_for(cond: Callable[[], bool], deadline: float = DEADLINE) -> None:
-    end = time.monotonic() + deadline
-    while not cond():
-        if time.monotonic() > end:
-            raise AssertionError("timed out")
-        time.sleep(0.01)
-
-
-def event(kind: str, data: str) -> str:
-    return f"event: {kind}\ndata: {data}\n\n"
-
-
-def entry(seq: int, kind: str = "dead", **extra: Any) -> dict[str, Any]:
-    e: dict[str, Any] = {
-        "seq": seq,
-        "kind": kind,
-        "boot": "b1",
-        "session": 1,
-        "modelTime": 2334.5 + seq,
-        "time": "2026-11-21T19:40:12.345Z",
-        "hookN": seq,
-        "unit": {"name": f"Tank-{seq}", "type": "T-55", "side": 1},
-        "pos": {"x": 100.0, "y": 200.0, "alt": 12.3, "lat": 26.1, "lon": 56.2},
-    }
-    e.update(extra)
-    return e
 
 
 def unit(name: str, x: float = 100.0, y: float = 200.0, **extra: Any) -> dict[str, Any]:
@@ -283,32 +112,11 @@ def tank(minute: int, name: str = "Tank") -> str:
 
 
 @pytest.fixture
-def fakes() -> Iterator[list[FakeCompanion]]:
-    made: list[FakeCompanion] = []
-    yield made
-    for fake in made:
-        fake.close()
-
-
-@pytest.fixture
 def links() -> Iterator[list[CompanionLink]]:
     made: list[CompanionLink] = []
     yield made
     for link in made:
         link.stop()
-
-
-@pytest.fixture
-def serve(
-    fakes: list[FakeCompanion],
-) -> Callable[..., FakeCompanion]:
-    def start(*scripts: list[Item], port: int = 0) -> FakeCompanion:
-        fake = FakeCompanion(list(scripts))
-        fake.start(port)
-        fakes.append(fake)
-        return fake
-
-    return start
 
 
 @pytest.fixture
@@ -391,7 +199,7 @@ def test_snapshot_parsed(serve: Any, connect: Any) -> None:
         ]
     )
     _, rec = connect(fake.address)
-    wait_for(lambda: len(rec.snapshots) == 1)
+    wait_until(lambda: len(rec.snapshots) == 1)
 
     snap = rec.snapshots[0]
     assert snap.minute == 0
@@ -435,20 +243,20 @@ def test_snapshot_parsed(serve: Any, connect: Any) -> None:
     assert "0117 | Tech hangar A object" not in by_name
     assert snap.units[-1] is combine
 
-    wait_for(lambda: rec.statuses[-2:] == [LinkStatus.LINKED, LinkStatus.RECEIVING])
+    wait_until(lambda: rec.statuses[-2:] == [LinkStatus.LINKED, LinkStatus.RECEIVING])
 
 
 def test_reconnects_after_drop(serve: Any, connect: Any) -> None:
     fake = serve([event("state", tank(0)), CLOSE], [event("state", tank(1))])
     _, rec = connect(fake.address, retry=0.1)
-    wait_for(lambda: len(rec.snapshots) == 2)
+    wait_until(lambda: len(rec.snapshots) == 2)
     assert [s.minute for s in rec.snapshots] == [0, 1]
 
 
 def test_refused(serve: Any, connect: Any) -> None:
     fake = serve([event("state", tank(0))])
     _, rec = connect(fake.address, token="bad", retry=0.1)
-    wait_for(lambda: fake.refused >= 2)
+    wait_until(lambda: fake.refused >= 2)
     assert rec.statuses == [LinkStatus.REFUSED]
     assert rec.snapshots == []
     assert fake.streams == 0
@@ -459,18 +267,18 @@ def test_waits_for_server(serve: Any, connect: Any) -> None:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     _, rec = connect(f"http://127.0.0.1:{port}", retry=0.1)
-    wait_for(lambda: LinkStatus.WAITING in rec.statuses)
+    wait_until(lambda: LinkStatus.WAITING in rec.statuses)
     assert rec.snapshots == []
 
     serve([event("state", tank(0))], port=port)
-    wait_for(lambda: len(rec.snapshots) == 1)
+    wait_until(lambda: len(rec.snapshots) == 1)
     assert rec.statuses[-2:] == [LinkStatus.LINKED, LinkStatus.RECEIVING]
 
 
 def test_silent_stream_reconnects(serve: Any, connect: Any) -> None:
     fake = serve()  # every stream: headers, then nothing
     _, rec = connect(fake.address, retry=0.1, read_timeout=0.3)
-    wait_for(lambda: fake.streams >= 2)
+    wait_until(lambda: fake.streams >= 2)
     assert rec.snapshots == []
 
 
@@ -480,7 +288,7 @@ def test_large_snapshot(serve: Any, connect: Any) -> None:
     assert len(data) > 500_000
     fake = serve([event("state", data)])
     _, rec = connect(fake.address)
-    wait_for(lambda: len(rec.snapshots) == 1)
+    wait_until(lambda: len(rec.snapshots) == 1)
     snap = rec.snapshots[0]
     assert len(snap.units) == 6000
     assert snap.unit_count == 6000
@@ -503,7 +311,7 @@ def test_bad_unit_skipped_bad_event_survives(
         ]
     )
     _, rec = connect(fake.address)
-    wait_for(lambda: len(rec.snapshots) == 1)
+    wait_until(lambda: len(rec.snapshots) == 1)
     assert [u.name for u in rec.snapshots[0].units] == ["Armor-1", "Armor-3"]
     assert fake.streams == 1
 
@@ -520,7 +328,7 @@ def test_stop(serve: Any, connect: Any) -> None:
     release = threading.Event()
     fake = serve([event("state", tank(0)), release, event("state", tank(1))])
     link, rec = connect(fake.address, retry=0.1)
-    wait_for(lambda: len(rec.snapshots) == 1)
+    wait_until(lambda: len(rec.snapshots) == 1)
 
     started = time.monotonic()
     link.stop()
@@ -538,10 +346,10 @@ def test_events_read_after_hello_and_on_notice(serve: Any, connect: Any) -> None
     fake = serve([notice, event("events", '{"lastSeq":6}')])
     fake.add(1, 2, 3, 4)
     _, rec = connect(fake.address, events_after=2, events=True)
-    wait_for(lambda: len(rec.batches) == 1)
+    wait_until(lambda: len(rec.batches) == 1)
     fake.add(5, 6)
     notice.set()
-    wait_for(lambda: len(rec.batches) == 2)
+    wait_until(lambda: len(rec.batches) == 2)
 
     assert [[e.seq for e in b.entries] for b in rec.batches] == [[3, 4], [5, 6]]
     assert [b.through for b in rec.batches] == [4, 6]
@@ -552,7 +360,7 @@ def test_events_paged(serve: Any, connect: Any) -> None:
     fake = serve()
     fake.add(*range(1, 12001))
     _, rec = connect(fake.address, events_after=0, events=True)
-    wait_for(lambda: len(rec.batches) == 3)
+    wait_until(lambda: len(rec.batches) == 3)
 
     assert fake.afters == [0, 5000, 10000]
     assert fake.limits == [5000, 5000, 5000]
@@ -565,15 +373,15 @@ def test_events_new_cursor_starts_at_hello(serve: Any, connect: Any) -> None:
     fake = serve([notice, event("events", '{"lastSeq":41}')])
     fake.add(*range(1, 41))
     _, rec = connect(fake.address, events_after=None, events=True)
-    wait_for(lambda: len(rec.batches) == 1)
-    wait_for(lambda: LinkStatus.LINKED in rec.statuses)
+    wait_until(lambda: len(rec.batches) == 1)
+    wait_until(lambda: LinkStatus.LINKED in rec.statuses)
 
     assert rec.batches[0].entries == ()
     assert rec.batches[0].through == 40
     assert fake.afters == []  # the log's history is never read
     fake.add(41)
     notice.set()
-    wait_for(lambda: len(rec.batches) == 2)
+    wait_until(lambda: len(rec.batches) == 2)
 
     assert fake.afters == [40]
     assert rec.seqs() == [41]
@@ -596,10 +404,10 @@ def test_notice_without_cursor_waits_for_hello(
     )
     fake.hellos_without_last = 1
     _, rec = connect(fake.address, retry=0.1, events_after=None, events=True)
-    wait_for(lambda: LinkStatus.LINKED in rec.statuses)
+    wait_until(lambda: LinkStatus.LINKED in rec.statuses)
     fake.add(*range(1, 8))
     notice.set()
-    wait_for(lambda: len(rec.snapshots) == 1)  # after the notice's read
+    wait_until(lambda: len(rec.snapshots) == 1)  # after the notice's read
 
     assert rec.batches == []
     assert fake.afters == []
@@ -607,7 +415,7 @@ def test_notice_without_cursor_waits_for_hello(
     assert len(told) == 1
 
     drop.set()
-    wait_for(lambda: len(rec.batches) == 1)
+    wait_until(lambda: len(rec.batches) == 1)
     assert rec.batches[0].entries == ()
     assert rec.batches[0].through == 7
     assert fake.afters == []
@@ -623,11 +431,11 @@ def test_cursor_above_log_said_once_per_connection(
     )
     fake.add(1, 2, 3, 4, 5)
     _, rec = connect(fake.address, retry=0.1, events_after=10, events=True)
-    wait_for(lambda: len(fake.afters) == 1)
+    wait_until(lambda: len(fake.afters) == 1)
     notices.set()
-    wait_for(lambda: len(fake.afters) == 3)
+    wait_until(lambda: len(fake.afters) == 3)
     drop.set()
-    wait_for(lambda: fake.streams == 2 and len(fake.afters) == 4)
+    wait_until(lambda: fake.streams == 2 and len(fake.afters) == 4)
 
     behind = [
         r.getMessage()
@@ -653,12 +461,12 @@ def test_cursor_past_hello_after_notice_not_said(
     fake = serve([first, event("events", "{}"), second, event("events", "{}")])
     fake.add(1, 2)
     _, rec = connect(fake.address, events_after=2, events=True)
-    wait_for(lambda: fake.afters == [2])
+    wait_until(lambda: fake.afters == [2])
     fake.add(3, 4)
     first.set()
-    wait_for(lambda: rec.seqs() == [3, 4])
+    wait_until(lambda: rec.seqs() == [3, 4])
     second.set()
-    wait_for(lambda: len(fake.afters) == 3)
+    wait_until(lambda: len(fake.afters) == 3)
 
     assert fake.afters == [2, 2, 4]
     assert not [r for r in caplog.records if "event log ends" in r.getMessage()]
@@ -669,10 +477,10 @@ def test_events_reconnect_misses_nothing(serve: Any, connect: Any) -> None:
     fake = serve([drop, CLOSE], [])
     fake.add(1, 2, 3)
     _, rec = connect(fake.address, retry=0.1, events_after=0, events=True)
-    wait_for(lambda: rec.seqs() == [1, 2, 3])
+    wait_until(lambda: rec.seqs() == [1, 2, 3])
     fake.add(4)
     drop.set()
-    wait_for(lambda: fake.streams == 2 and len(rec.batches) == 2)
+    wait_until(lambda: fake.streams == 2 and len(rec.batches) == 2)
 
     assert rec.seqs() == [1, 2, 3, 4]
     assert fake.afters == [0, 3]
@@ -686,8 +494,8 @@ def test_bad_entry_skipped(
     fake.add(1, 2, 3)
     del fake.entries[1]["kind"]
     _, rec = connect(fake.address, events_after=0, events=True)
-    wait_for(lambda: len(rec.batches) == 1)
-    wait_for(lambda: LinkStatus.LINKED in rec.statuses)
+    wait_until(lambda: len(rec.batches) == 1)
+    wait_until(lambda: LinkStatus.LINKED in rec.statuses)
 
     assert rec.seqs() == [1, 3]
     warnings = [
@@ -708,10 +516,10 @@ def test_trailing_bad_entries_not_asked_again(
     del fake.entries[1]["kind"]
     del fake.entries[2]["kind"]
     _, rec = connect(fake.address, events_after=0, events=True)
-    wait_for(lambda: len(rec.batches) == 1)
+    wait_until(lambda: len(rec.batches) == 1)
     fake.add(4)
     notice.set()
-    wait_for(lambda: len(rec.batches) == 2)
+    wait_until(lambda: len(rec.batches) == 2)
 
     assert [[e.seq for e in b.entries] for b in rec.batches] == [[1], [4]]
     assert [b.through for b in rec.batches] == [3, 4]
@@ -742,12 +550,12 @@ def test_page_of_bad_entries_does_not_stall(
     del fake.entries[0]["kind"]
     del fake.entries[1]["kind"]
     _, rec = connect(fake.address, events_after=0, events=True)
-    wait_for(lambda: LinkStatus.LINKED in rec.statuses)
+    wait_until(lambda: LinkStatus.LINKED in rec.statuses)
     notices[0].set()  # the same bad page is not asked again
-    wait_for(lambda: len(fake.afters) == 2)
+    wait_until(lambda: len(fake.afters) == 2)
     fake.add(3)
     notices[1].set()
-    wait_for(lambda: len(rec.batches) == 1)
+    wait_until(lambda: len(rec.batches) == 1)
 
     assert rec.seqs() == [3]
     assert rec.batches[0].through == 3

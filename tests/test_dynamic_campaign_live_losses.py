@@ -31,6 +31,7 @@ import pytest
 from dcs import Mission
 from dcs.mapping import Point
 from dcs.terrain.terrain import Terrain
+from dcs.triggers import TriggerZone
 
 from game import persistency
 from game.ato.flight import Flight
@@ -65,11 +66,11 @@ from game.theater import (
     TheaterUnit,
 )
 from game.transfers import CargoShip, Convoy, TransferOrder
-from tests.test_dynamic_campaign_air_wing import (
+from game.unitmap import SceneryObjectMapping
+from tests.conftest import (
     generate_starting_mission,
     new_game,
     plan_by_hand,
-    saved_games,  # noqa: F401 (the fixture)
     squadrons,
 )
 
@@ -219,17 +220,53 @@ GAME_OBJECTS = (
 )
 
 
+#: The opcodes that push their string argument.
+STRING_OPS = frozenset(
+    {
+        "STRING",
+        "BINSTRING",
+        "SHORT_BINSTRING",
+        "UNICODE",
+        "BINUNICODE",
+        "SHORT_BINUNICODE",
+        "BINUNICODE8",
+    }
+)
+
+
 def pickled_modules(data: bytes) -> set[str]:
-    """The module of every class or function the pickle names."""
+    """The module of every class or function the pickle names.
+
+    `GLOBAL` (and `INST`) carries "module name" as its argument; `STACK_GLOBAL`
+    takes the module and the name from the stack, pushed just before it, each
+    a string opcode or, for a string the pickle has written before, a get from
+    the memo. The memo is followed here as the unpickler follows it.
+    """
     modules: set[str] = set()
-    strings: list[str] = []
+    memo: dict[int, object] = {}
+    top: object = None  # what the last opcode pushed
+    strings: list[str] = []  # the strings pushed, in order
     for op, arg, _ in pickletools.genops(data):
-        if isinstance(arg, str):
-            strings.append(arg)
+        if op.name in ("FRAME", "PROTO"):
+            continue
+        if op.name == "MEMOIZE":
+            memo[len(memo)] = top
+            continue
+        if op.name in ("PUT", "BINPUT", "LONG_BINPUT"):
+            memo[cast(int, arg)] = top
+            continue
+        if op.name in STRING_OPS:
+            top = arg
+        elif op.name in ("GET", "BINGET", "LONG_BINGET"):
+            top = memo[cast(int, arg)]
+        else:
+            top = None
         if op.name == "STACK_GLOBAL":
             modules.add(strings[-2])
         elif op.name in ("GLOBAL", "INST"):
             modules.add(str(arg).split(" ")[0])
+        elif isinstance(top, str):
+            strings.append(top)
     return modules
 
 
@@ -240,7 +277,10 @@ def test_name_map_pickles_without_pydcs(started: Started) -> None:
 
     for module in (b"dcs.mission", b"dcs.translation", b"dcs.unit\n"):
         assert module not in data
-    assert not {"dcs.mission", "dcs.translation", "dcs.unit"} & pickled_modules(data)
+    modules = pickled_modules(data)
+    # The map's own modules are found, a module named again read from the memo.
+    assert {"game.companionlink.liveunitmap", "game.unitmap"} <= modules
+    assert not {"dcs.mission", "dcs.translation", "dcs.unit"} & modules
 
     # The map's own objects hold nothing of pydcs; what it points at in the game
     # (a campaign's scenery unit keeps its pydcs trigger zone) the save already
@@ -284,6 +324,55 @@ def test_scenery_found_by_position(started: Started) -> None:
 
     quad = next(z for z in zones if z.corners is not None)
     assert name_map.scenery_at(quad.x, quad.y) == quad.name
+
+
+def test_scenery_quad_edge_and_overlap(started: Started) -> None:
+    """A quad holds the points on its edges; where a circle and a quad
+    overlap, the quad answers, whichever the map lists first."""
+    real = next(
+        m
+        for m in written_map(started).scenery_objects.values()
+        if cast(ZoneShape, m.trigger_zone).corners is not None
+    )
+    real_quad = cast(ZoneShape, real.trigger_zone)
+    assert real_quad.corners is not None
+    corner_x, corner_y = real_quad.corners[0]
+    assert written_map(started).scenery_at(corner_x, corner_y) == real_quad.name
+
+    quad = ZoneShape("quad", 50, 50, 0, ((0, 0), (0, 100), (100, 100), (100, 0)))
+    circle = ZoneShape("circle", 95, 50, 40)
+    for zones in ((quad, circle), (circle, quad)):
+        name_map = LiveUnitMap()
+        for zone in zones:
+            name_map.scenery_objects[zone.name] = SceneryObjectMapping(
+                real.ground_unit, cast(TriggerZone, zone)
+            )
+
+        assert name_map.scenery_at(50, 0) == "quad"  # on an edge
+        assert name_map.scenery_at(100, 30) == "quad"  # on the edge in the circle
+        assert name_map.scenery_at(90, 50) == "quad"  # inside both
+        assert name_map.scenery_at(120, 50) == "circle"  # the circle's alone
+        assert name_map.scenery_at(50, -1) is None
+
+
+def test_save_before_live_loads(saved_games: Path, tmp_path: Path) -> None:
+    """A save from before `Game.live` loads with a fresh live record."""
+    game = new_game(dynamic=True, squadrons_start_full=True, campaign_file=CAMPAIGN)
+    del game.__dict__["live"]
+    game.savepath = str(tmp_path / "old.retribution")
+    assert persistency.save_game(game)
+
+    loaded = persistency.load_game(game.savepath)
+    assert loaded is not None
+    Migrator(loaded, is_liberation=False)
+
+    live = loaded.live
+    assert isinstance(live, LiveRecord)
+    assert live.marker is None
+    assert live.cursor is None
+    assert live.verdicts == {} and live.dead == set()
+    assert not live.name_map.aircraft
+    assert not live.following_own_mission
 
 
 def test_missions_decided_by_marker(caplog: pytest.LogCaptureFixture) -> None:
@@ -455,8 +544,17 @@ def test_game_does_not_import_the_link() -> None:
     assert done.stdout.strip() == "False"
 
 
-def test_record_survives_save_and_load(started: Started, tmp_path: Path) -> None:
-    game = started.game
+@pytest.fixture
+def own_game(started: Started) -> Game:
+    """A copy of Begin Campaign's game, for a test that changes it; the
+    module's game stays as the tests that only read it found it."""
+    return cast(Game, pickle.loads(pickle.dumps(started.game)))
+
+
+def test_record_survives_save_and_load(
+    started: Started, own_game: Game, tmp_path: Path
+) -> None:
+    game = own_game
     record = game.live
     marker = MARKER_PREFIX + started.uuid
     record.decide(snapshot("boot", 7, marker))
@@ -785,6 +883,20 @@ def test_vanished_after_landing_is_not_a_loss(live: Live) -> None:
     batch = apply_entries(game, [log(4, "vanished", "LIVE 1-1", category="plane")])
     assert squadron.owned_aircraft == owned - 1
     assert batch.dead == ["LIVE 1-1"]
+
+
+def test_takeoff_clears_landed(live: Live) -> None:
+    """An aircraft that landed and took off again is lost when it vanishes."""
+    game = live.game
+    squadron = live.flight.squadron
+    owned = squadron.owned_aircraft
+
+    apply_entries(game, [log(1, "land", "LIVE 1-2", category="plane")])
+    apply_entries(game, [log(2, "takeoff", "LIVE 1-2", category="plane")])
+    batch = apply_entries(game, [log(3, "vanished", "LIVE 1-2", category="plane")])
+
+    assert batch.dead == ["LIVE 1-2"]
+    assert squadron.owned_aircraft == owned - 1
 
 
 def test_uncapturable_captures_skipped(saved_games: Path) -> None:

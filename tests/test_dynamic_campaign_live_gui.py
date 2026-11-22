@@ -47,21 +47,17 @@ from qt_ui.flightlauncher import FlightLauncher  # noqa: E402
 from qt_ui.livelosses import LiveLosses  # noqa: E402
 from qt_ui.models import GameModel, PackageModel  # noqa: E402
 from qt_ui.simcontroller import SimController  # noqa: E402
-from tests.companionlink.test_commands import TOKEN as COMMAND_TOKEN  # noqa: E402
-from tests.companionlink.test_commands import FakeCommands  # noqa: E402
-from tests.companionlink.test_link import (  # noqa: E402
+from tests.conftest import (  # noqa: E402
+    COMMAND_TOKEN,
     TOKEN,
+    FakeCommands,
     FakeCompanion,
     entry,
     event,
-    fakes,  # noqa: F401 (the fixture)
-    serve,  # noqa: F401 (the fixture)
-)
-from tests.test_dynamic_campaign_air_wing import (  # noqa: E402
     generate_starting_mission,
     new_game,
     plan_by_hand,
-    saved_games,  # noqa: F401 (the fixture)
+    wait_until,
 )
 
 CAMPAIGN = Path("resources/campaigns/golan_heights_lite.yaml")
@@ -88,7 +84,9 @@ def game(saved_games: Path, tmp_path: Path) -> Game:
 
 
 class Window:
-    """The main window's link controller and live losses for a game."""
+    """The main window's link controller and live losses for a game; the
+    map's events it sends are kept in `map_events` (the `window` fixture
+    records `EventStream.put_nowait`)."""
 
     def __init__(self, app: QApplication, game: Game) -> None:
         self.app = app
@@ -100,25 +98,20 @@ class Window:
         self.map_events: list[GameUpdateEvents] = []
 
     def start(self) -> None:
-        EventStream.drain()
         self.link.set_game(self.game)
 
     def pump(self) -> None:
-        """Turns the Qt event loop and collects the map's events."""
+        """Turns the Qt event loop."""
         self.app.processEvents()
-        while not EventStream._queue.empty():
-            self.map_events.append(EventStream._queue.get_nowait())
-            EventStream._queue.task_done()
 
     def wait_for(self, cond: Callable[[], bool]) -> None:
-        end = time.monotonic() + DEADLINE
-        while True:
+        """Turns the Qt event loop until `cond` holds."""
+
+        def pumped() -> bool:
             self.pump()
-            if cond():
-                return
-            if time.monotonic() > end:
-                raise AssertionError("timed out")
-            time.sleep(0.01)
+            return cond()
+
+        wait_until(pumped, timeout=DEADLINE)
 
     def live_maps(self) -> list[Any]:
         return [e.live_units for e in self.map_events if e.live_units is not None]
@@ -136,6 +129,7 @@ def window(
         )
         monkeypatch.setattr(liberation_install, "companion_token", lambda: TOKEN)
         w = Window(app, game)
+        monkeypatch.setattr(EventStream, "put_nowait", w.map_events.append)
         made.append(w)
         w.start()
         return w
@@ -252,17 +246,17 @@ def test_only_own_mission_followed(
     [drawn, cleared] = w.live_maps()
     assert drawn is own and cleared.units == () and cleared.boot == ""
     clock = LiveStateContext.clock()
-    now = clock.now()
-    time.sleep(0.05)
-    assert clock.now() == now
+    held_at = clock.now()
+    assert held_at is not None
+    assert clock.now(time.monotonic() + 60.0) == held_at  # a minute on, no later
 
     own_gate.set()
     w.wait_for(lambda: w.link.status_text() == "Companion: minute 5, 0 units")
     assert following(game)
-    running = clock.now()
-    time.sleep(0.05)
-    later = clock.now()
-    assert running is not None and later is not None and later > running
+    wall = time.monotonic()
+    running, later = clock.now(wall), clock.now(wall + 60.0)
+    assert running is not None and later is not None
+    assert (later - running).total_seconds() == pytest.approx(60.0)
 
     # No snapshot for STALE_S: stale, not followed, the clock held.
     w.wait_for(
@@ -270,8 +264,8 @@ def test_only_own_mission_followed(
     )
     assert not following(game)
     stale = clock.now()
-    time.sleep(0.05)
-    assert clock.now() == stale
+    assert stale is not None
+    assert clock.now(time.monotonic() + 60.0) == stale
     assert len(w.live_maps()) == 4  # own, cleared, own, cleared
 
 
@@ -539,6 +533,45 @@ def test_edit_flight_dialog_defers_removal(
     assert any(flight.id in e.deleted_flights for e in w.map_events)
 
 
+def test_package_dialog_defers_finished_flight(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[[FakeCompanion], Window],
+    game: Game,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = threading.Event()
+    fake = serve([event("state", state(game, 1)), gate, event("events", "{}")])
+    w = window(fake)
+    w.wait_for(lambda: following(game) and game.live.cursor == 0)
+    monkeypatch.setattr(Dialog, "game_model", w.game_model)
+    monkeypatch.setattr(Dialog, "edit_package_dialog", None)
+
+    uiconstants.load_event_icons()  # the dialog's window icon
+    flight = launched_flight(game)
+    squadron = flight.squadron
+    package_model: PackageModel = w.game_model.ato_model.package_models.acquire(
+        flight.package
+    )
+    Dialog.open_edit_package_dialog(package_model)
+    dialog = Dialog.edit_package_dialog
+    assert dialog is not None and dialog.isVisible()
+
+    with fake.lock:
+        fake.entries.append(plane(1, "dead", "LIVE 1-1"))
+        fake.entries.append(plane(2, "land", "LIVE 1-2"))
+    gate.set()
+    w.wait_for(lambda: game.live.cursor == 2)
+    assert flight in ato_flights(game)
+    assert not any(flight.id in e.deleted_flights for e in w.map_events)
+
+    dialog.reject()
+    w.pump()
+    assert flight not in ato_flights(game)
+    assert any(flight.id in e.deleted_flights for e in w.map_events)
+    held = sum(f.count for f in ato_flights(game) if f.squadron is squadron)
+    assert squadron.untasked_aircraft == squadron.owned_aircraft - held
+
+
 def test_drain_stops_when_nothing_held(
     serve: Callable[..., FakeCompanion],
     window: Callable[[FakeCompanion], Window],
@@ -612,5 +645,54 @@ def test_spawn_confirmed_while_link_stale_launched(
         assert flight.launched is True
         assert not [r for r in caplog.records if "it launches again" in r.getMessage()]
         assert len(commands.requests) == 1
+    finally:
+        launcher.stop()
+
+
+def test_launcher_refuses_foreign_mission(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[[FakeCompanion], Window],
+    game: Game,
+    commands: FakeCommands,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(
+        liberation_install, "companion_command_address", lambda: commands.address
+    )
+    monkeypatch.setattr(
+        liberation_install, "companion_command_token", lambda: COMMAND_TOKEN
+    )
+    commands.statuses = ["spawned"]
+    foreign_gate = threading.Event()
+    fake = serve(
+        [
+            event("state", state(game, 1)),
+            foreign_gate,
+            event("state", state(game, 1, boot="b2", own=False)),
+        ]
+    )
+    w = window(fake)
+    launcher = FlightLauncher(w.link)
+    launcher.set_game(game)
+    try:
+        w.wait_for(lambda: following(game) and launcher.receiving)
+        foreign_gate.set()
+        w.wait_for(lambda: "another mission" in w.link.status_text())
+        assert launcher.receiving
+        flight = plan_by_hand(game, 2)
+
+        launcher.launch_now(flight)
+        w.pump()
+
+        said = (
+            f"Launch: the running mission is not this campaign's; {flight} "
+            "not launched"
+        )
+        assert said in [r.getMessage() for r in caplog.records]
+        assert not launcher.is_busy(flight) and not flight.launched
+        assert game.live.name_map.flight_units(flight) == []
+        assert commands.requests == []
     finally:
         launcher.stop()
