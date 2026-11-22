@@ -53,6 +53,9 @@ loggers:
   qt_ui.flightlauncher:
     # A few lines per flight launched into the live mission, and its failures.
     level: INFO
+  qt_ui.livelosses:
+    # One line per batch of live losses, and a chunk that fails to apply.
+    level: INFO
   httpcore:
     # Logs every connection step at debug: eight lines per companion retry.
     level: INFO

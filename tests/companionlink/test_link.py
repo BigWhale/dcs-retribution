@@ -606,6 +606,25 @@ def test_cursor_above_log_said_once_per_connection(
     assert rec.batches == []
 
 
+def test_cursor_past_hello_after_notice_not_said(
+    serve: Any, connect: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="game.companionlink")
+    first, second = threading.Event(), threading.Event()
+    fake = serve([first, event("events", "{}"), second, event("events", "{}")])
+    fake.add(1, 2)
+    _, rec = connect(fake.address, events_after=2, events=True)
+    wait_for(lambda: fake.afters == [2])
+    fake.add(3, 4)
+    first.set()
+    wait_for(lambda: rec.seqs() == [3, 4])
+    second.set()
+    wait_for(lambda: len(fake.afters) == 3)
+
+    assert fake.afters == [2, 2, 4]
+    assert not [r for r in caplog.records if "event log ends" in r.getMessage()]
+
+
 def test_events_reconnect_misses_nothing(serve: Any, connect: Any) -> None:
     drop = threading.Event()
     fake = serve([drop, CLOSE], [])

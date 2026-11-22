@@ -96,8 +96,6 @@ class CompanionLink(threading.Thread):
         self._after: Optional[int] = events_after
         # The last hello's lastSeq, when it had one.
         self._hello_last: Optional[int] = None
-        # Whether this connection warned of a log that ends before the cursor.
-        self._told_behind = False
         self._halt = threading.Event()
         # Guards _halted and _sock, and holds a callback while it runs, so
         # none starts once stop() has set _halted.
@@ -168,7 +166,7 @@ class CompanionLink(threading.Thread):
             hello = client.get(f"{self._address}/v1/hello")
             self._check(hello, "hello")
             self._hello(hello)
-            self._fetch_events(client)
+            self._fetch_events(client, after_hello=True)
             with client.stream(
                 "GET",
                 f"{self._address}/v1/stream",
@@ -216,7 +214,6 @@ class CompanionLink(threading.Thread):
             hello.get("boot"),
             hello.get("session"),
         )
-        self._told_behind = False
         last = hello.get("lastSeq")
         self._hello_last = (
             last if isinstance(last, int) and not isinstance(last, bool) else None
@@ -241,9 +238,11 @@ class CompanionLink(threading.Thread):
             except OSError:
                 pass
 
-    def _fetch_events(self, client: httpx.Client) -> None:
+    def _fetch_events(self, client: httpx.Client, after_hello: bool = False) -> None:
         """Reads the event log from the cursor to its lastSeq; a failure
-        raises, and the next connection reads again from the cursor."""
+        raises, and the next connection reads again from the cursor. Only the
+        read right after a hello compares the cursor with the hello's lastSeq,
+        once per connection: a notice's read finds the hello's lastSeq stale."""
         if self._on_events is None:
             return
         if self._after is None:
@@ -255,11 +254,10 @@ class CompanionLink(threading.Thread):
                 log.info("companion events: a new cursor at %d", self._after)
             return
         if (
-            not self._told_behind
+            after_hello
             and self._hello_last is not None
             and self._hello_last < self._after
         ):
-            self._told_behind = True
             log.warning(
                 "Live losses: the companion's event log ends at %d, before this "
                 "campaign's cursor %d; nothing is read until it catches up",
