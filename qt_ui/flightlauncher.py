@@ -6,7 +6,10 @@ and launches each: its group is generated on the GUI thread (about 0.2 s),
 made fit for the live mission, then sent to DCS Companion's command port and
 followed to `spawned` on a worker thread. The result comes back to the GUI
 thread by a queued signal: a spawned flight is marked launched ("In Flight"),
-a failed one waits for the user to press Launch again.
+a failed one waits for the user to press Launch again. A spawned flight's
+units join the game's name map (`game.live.name_map`) by the names they were
+sent with, so its losses are debriefed. Nothing is launched while the running
+mission is not the campaign's own (`game.live.following_own_mission`).
 
 A spawn the companion has accepted but not yet confirmed keeps its flight
 busy (not due, not editable, no Launch) while the worker follows it, up to
@@ -73,6 +76,7 @@ from game.companionlink.flightspawn import (
     IdAllocator,
     generate_flight_table,
     prepare_spawn,
+    unit_names,
 )
 from game.companionlink.launching import due_flights
 from game.companionlink.link import LinkStatus
@@ -162,6 +166,8 @@ class FlightLauncher(QObject):
         self._failed: set[Flight] = set()
         # The group name each flight on its way was sent as.
         self._sent_as: dict[Flight, str] = {}
+        # The unit names each flight on its way was sent with.
+        self._sent_units: dict[Flight, list[str]] = {}
         # The mission the ids and names below were handed out in.
         self._mission: Optional[tuple[str, int]] = None
         self._ids = IdAllocator()
@@ -202,6 +208,7 @@ class FlightLauncher(QObject):
         self._in_progress.clear()
         self._failed.clear()
         self._sent_as.clear()
+        self._sent_units.clear()
         self._forget_mission()
         if game is not None and game.dynamic_campaign:
             self._timer.start()
@@ -261,6 +268,13 @@ class FlightLauncher(QObject):
                 flight,
             )
             return
+        if not game.live.following_own_mission:
+            log.warning(
+                "Launch: the running mission is not this campaign's; "
+                "%s not launched",
+                flight,
+            )
+            return
         self._in_progress.add(flight)
         self.launch_started.emit(flight)
 
@@ -313,6 +327,7 @@ class FlightLauncher(QObject):
             model_time,
         )
         self._sent_as[flight] = request.name
+        self._sent_units[flight] = unit_names(request)
         worker = threading.Thread(
             target=self._send,
             args=(
@@ -452,12 +467,16 @@ class FlightLauncher(QObject):
         self._end_launch(flight)
         flight.launched = True
         flight.live_group_name = self._sent_as.pop(flight, None)
+        game = self._game
+        if game is not None:
+            game.live.name_map.add_launched(flight, self._sent_units.pop(flight, []))
         log.info("Launch: %s is in flight (spawn %s)", flight, spawn_id)
         self.launched.emit(flight)
 
     def _fail(self, flight: Flight, message: str) -> None:
         self._end_launch(flight)
         self._sent_as.pop(flight, None)
+        self._sent_units.pop(flight, None)
         self._failed.add(flight)
         log.warning("Launch failed: %s", message)
         self.launch_failed.emit(flight, message)

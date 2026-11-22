@@ -18,7 +18,7 @@ from dcs.planes import F_16C_50
 from dcs.terrain import PersianGulf
 from dcs.unit import Skill
 
-from game.companionlink.flightspawn import IdAllocator, prepare_spawn
+from game.companionlink.flightspawn import IdAllocator, prepare_spawn, unit_names
 from game.companionlink.snapshot import LiveSnapshot
 
 NAME = "Uzi 1|2|1|F-16C_50|"
@@ -148,6 +148,17 @@ def test_name_taken_picks_next_number() -> None:
     ]
     assert request.name in sent
     assert spawn(make_table(), snap, ids, sent).name == "Uzi 1|2|3|F-16C_50|"
+
+
+def test_unit_names_follow_the_rename() -> None:
+    request = spawn(
+        make_table(), snapshot(names=frozenset({NAME})), IdAllocator(), set()
+    )
+
+    assert unit_names(request) == [
+        "Uzi 1|2|2|F-16C_50| Pilot #1",
+        "Uzi 1|2|2|F-16C_50| Pilot #2",
+    ]
 
 
 def test_name_held_by_the_companion_picks_next_number() -> None:

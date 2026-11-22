@@ -30,13 +30,16 @@ def due_flights(
 ) -> list[Flight]:
     """The flights to launch at `now`, in start-time order.
 
-    None unless the campaign is dynamic, the link is receiving and the
+    None unless the campaign is dynamic, the link is receiving, the running
+    mission is the campaign's own (`game.live.following_own_mission`) and the
     mission's time is known. Otherwise every flight of both ATOs that is not
     launched, not being launched (`in_progress`) and not failed, whose start
     time is `now` or earlier. A flight whose start time cannot be computed is
     skipped.
     """
     if not game.dynamic_campaign or not receiving or now is None:
+        return []
+    if not game.live.following_own_mission:
         return []
     due: list[tuple[datetime, Flight]] = []
     for flight in _flights(game):

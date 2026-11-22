@@ -57,9 +57,11 @@ def game(
     blue: list[list[FakeFlight]],
     red: list[list[FakeFlight]] | None = None,
     dynamic: bool = True,
+    following: bool = True,
 ) -> Any:
     return SimpleNamespace(
         dynamic_campaign=dynamic,
+        live=SimpleNamespace(following_own_mission=following),
         blue=SimpleNamespace(ato=ato(*blue)),
         red=SimpleNamespace(ato=ato(*(red or []))),
     )
@@ -102,6 +104,13 @@ def test_due_waits_for_receiving_link() -> None:
     assert due(g, at("08:05"), receiving=False) == []
     assert due(g, None) == []
     assert due(g, at("08:05"), receiving=True) == [first, second]
+
+
+def test_nothing_due_for_a_foreign_mission() -> None:
+    flight = FakeFlight("flight", "08:00")
+
+    assert due(game([[flight]], following=False), at("08:05")) == []
+    assert due(game([[flight]], following=True), at("08:05")) == [flight]
 
 
 def test_flight_in_progress_not_due_again() -> None:

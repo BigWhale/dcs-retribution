@@ -7,7 +7,8 @@ for a Cold or Warm start), and lifts the flight's pydcs group table out
 (`Group.dict()`). `prepare_spawn` then makes that table fit the running
 mission: new group and unit ids, a name the mission does not use, AI skills
 and mission times turned into the live mission's model times.
-The result is the `POST /v1/spawn` request for DCS Companion.
+The result is the `POST /v1/spawn` request for DCS Companion; `unit_names`
+gives its unit names, which a confirmed launch adds to the name map.
 
 Only a dynamic campaign's launcher calls these.
 """
@@ -240,6 +241,11 @@ def prepare_spawn(
 
     sent_names.add(name)
     return SpawnRequest(name=name, country=country, category=category, group=group)
+
+
+def unit_names(request: SpawnRequest) -> list[str]:
+    """The names of the request's units, in the group table's unit order."""
+    return [u["name"] for u in _units(request.group)]
 
 
 def _free_name(name: str, unit_names: list[str], taken: frozenset[str]) -> str:
