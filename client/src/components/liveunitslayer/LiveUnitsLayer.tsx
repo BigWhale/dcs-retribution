@@ -44,20 +44,51 @@ const HEADING_STEP = 5;
 const roundedHeading = (heading: number) =>
   (((Math.round(heading / HEADING_STEP) * HEADING_STEP) % 360) + 360) % 360;
 
-// The milsymbol options that outline the units of the flight selected in the
-// ATO. Statics are circles and never outlined: they belong to no flight.
-const OUTLINE = { outlineColor: "yellow", outlineWidth: 2 };
+// Every affiliation milsymbol colours by, to one colour.
+const byAffiliation = (color: string) => ({
+  Friend: color,
+  Hostile: color,
+  Neutral: color,
+  Unknown: color,
+  Civilian: color,
+  Suspect: color,
+});
 
-// Icons by look (code, rounded heading, tail length, outline). A minute's
+// The units of the flight selected in the ATO stand out: a thick yellow
+// outline (in the symbol's own units, where the frame is about 100 wide: 20
+// is a 4 px border at SYMBOL_SIZE), each side's fill darkened, and white
+// letters on it. Statics are circles and never stand out: they belong to no
+// flight. Built fresh for every symbol: milsymbol changes the colour objects
+// it is given for civilian, joker and faker codes.
+const standingOut = () => ({
+  outlineColor: "yellow",
+  outlineWidth: 20,
+  colorMode: {
+    Friend: "#003380",
+    Hostile: "#990000",
+    Neutral: "#006600",
+    Unknown: "#7a6a00",
+    Civilian: "#500050",
+    Suspect: "#995c00",
+  },
+  iconColor: byAffiliation("white"),
+});
+
+// Lifts the selected flight's markers above every other marker on the map:
+// Leaflet adds it to a marker's screen y, and the map's other raised markers
+// use up to 10000.
+const STANDING_OUT_Z_INDEX = 100000;
+
+// Icons by look (code, rounded heading, tail length, standing out). A minute's
 // snapshot moves most units only a little, so it reuses most icons; the same
 // object also keeps react-leaflet from calling setIcon on an unchanged marker.
 const iconCache = new Map<string, Icon>();
 
-export function liveUnitIcon(unit: LiveUnit, outlined: boolean): Icon {
+export function liveUnitIcon(unit: LiveUnit, standsOut: boolean): Icon {
   const tail = tailLength(unit.speed);
   const heading = roundedHeading(unit.heading);
   const look = tail > 0 ? `${unit.sidc}/${heading}/${tail}` : unit.sidc;
-  const key = outlined ? `${look}/outlined` : look;
+  const key = standsOut ? `${look}/selected` : look;
   const cached = iconCache.get(key);
   if (cached) {
     return cached;
@@ -65,7 +96,7 @@ export function liveUnitIcon(unit: LiveUnit, outlined: boolean): Icon {
   const symbol = new ms.Symbol(unit.sidc, {
     size: SYMBOL_SIZE,
     ...(tail > 0 ? { direction: heading, speedLeader: tail } : {}),
-    ...(outlined ? OUTLINE : {}),
+    ...(standsOut ? standingOut() : {}),
   });
   const icon = new Icon({
     iconUrl: symbol.toDataURL(),
@@ -101,7 +132,7 @@ interface LiveUnitTooltipProps {
 interface LiveUnitMarkerProps {
   unit: LiveUnit;
   // The unit belongs to the flight selected in the ATO.
-  outlined: boolean;
+  standsOut: boolean;
 }
 
 function LiveUnitTooltip(props: LiveUnitTooltipProps) {
@@ -130,7 +161,8 @@ function LiveUnitMarker(props: LiveUnitMarkerProps) {
     return (
       <Marker
         position={unit.position}
-        icon={liveUnitIcon(unit, props.outlined)}
+        icon={liveUnitIcon(unit, props.standsOut)}
+        zIndexOffset={props.standsOut ? STANDING_OUT_Z_INDEX : 0}
       >
         <LiveUnitTooltip unit={unit} />
       </Marker>
@@ -148,9 +180,10 @@ function LiveUnitMarker(props: LiveUnitMarkerProps) {
 }
 
 // Each snapshot brings new objects for every unit; a unit whose drawn fields
-// did not change (a parked aircraft) is not rendered again.
+// did not change (a parked aircraft) is not rendered again. Selecting or
+// deselecting its flight changes its icon and z-index, so it is drawn again.
 const sameDrawnUnit = (a: LiveUnitMarkerProps, b: LiveUnitMarkerProps) =>
-  a.outlined === b.outlined &&
+  a.standsOut === b.standsOut &&
   a.unit.position.lat === b.unit.position.lat &&
   a.unit.position.lng === b.unit.position.lng &&
   a.unit.side === b.unit.side &&
@@ -179,7 +212,7 @@ export default function LiveUnitsLayer(props: LiveUnitsLayerProps) {
           <MemoLiveUnitMarker
             key={unit.name}
             unit={unit}
-            outlined={
+            standsOut={
               selectedFlightId != null && unit.flight_id === selectedFlightId
             }
           />

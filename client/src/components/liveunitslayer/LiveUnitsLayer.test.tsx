@@ -1,5 +1,7 @@
+import { deselectFlight, selectFlight } from "../../api/flightsSlice";
 import { renderWithProviders } from "../../testutils";
 import LiveUnitsLayer, { BLUE_COLOR } from "./LiveUnitsLayer";
+import { act } from "@testing-library/react";
 import ms from "milsymbol";
 import { PropsWithChildren } from "react";
 
@@ -124,28 +126,91 @@ test("tail only on a moving unit", async () => {
   expect(tank.speedLeader ?? 0).toBe(0);
 });
 
-test("outlines the selected flight's units", async () => {
+test("the selected flight's units stand out", async () => {
   const units = [
     unit("Enfield 1-1", "plane", 2, "10030100001101050000", 90, 200, "f-1"),
-    unit("Enfield 1-2", "plane", 2, "10030100001101060000", 90, 200, "f-1"),
+    unit("Enfield 1-2", "plane", 1, "10060100001101060000", 90, 200, "f-1"),
     unit("Tank 3", "ground", 1, "10061000001221000000", 0, 0),
+    unit("Hangar 3", "static", 2, "10000000000000000000", 0, 0),
   ];
-  const outlined = (sidc: string) =>
-    symbolOptionsFor(sidc).map((options) => [
-      options.outlineColor,
-      options.outlineWidth,
-    ]);
+  const look = (sidc: string) =>
+    symbolOptionsFor(sidc).map((options) => ({
+      outlineColor: options.outlineColor,
+      outlineWidth: options.outlineWidth,
+      colorMode: options.colorMode,
+      iconColor: options.iconColor,
+    }));
+  const plain = {
+    outlineColor: undefined,
+    outlineWidth: undefined,
+    colorMode: undefined,
+    iconColor: undefined,
+  };
+  const standingOut = {
+    outlineColor: "yellow",
+    outlineWidth: 20,
+    colorMode: {
+      Friend: "#003380",
+      Hostile: "#990000",
+      Neutral: "#006600",
+      Unknown: "#7a6a00",
+      Civilian: "#500050",
+      Suspect: "#995c00",
+    },
+    iconColor: {
+      Friend: "white",
+      Hostile: "white",
+      Neutral: "white",
+      Unknown: "white",
+      Civilian: "white",
+      Suspect: "white",
+    },
+  };
+  // The z-index offset each unit's marker was last drawn with.
+  const zIndexOffsets = () =>
+    Object.fromEntries(
+      mockMarker.mock.calls.map(([props]) => [
+        props.children.props.unit.name,
+        props.zIndexOffset,
+      ]),
+    );
 
-  // Drawn first with no flight selected, so the outlined icons below cannot
-  // come from the cache.
-  renderUnits(units, null);
-  for (const u of units) {
-    expect(outlined(u.sidc)).toEqual([[undefined, undefined]]);
+  // Drawn first with no flight selected, so the icons that stand out below
+  // cannot come from the cache.
+  const { store } = renderUnits(units, null);
+  for (const u of units.slice(0, 3)) {
+    expect(look(u.sidc)).toEqual([plain]);
   }
+  expect(zIndexOffsets()).toEqual({
+    "Enfield 1-1": 0,
+    "Enfield 1-2": 0,
+    "Tank 3": 0,
+  });
 
   symbolSpy.mockClear();
-  renderUnits(units, "f-1");
-  expect(outlined("10030100001101050000")).toEqual([["yellow", 2]]);
-  expect(outlined("10030100001101060000")).toEqual([["yellow", 2]]);
-  expect(outlined("10061000001221000000")).toEqual([]);
+  act(() => {
+    store.dispatch(selectFlight("f-1"));
+  });
+  expect(look("10030100001101050000")).toEqual([standingOut]);
+  expect(look("10060100001101060000")).toEqual([standingOut]);
+  expect(look("10061000001221000000")).toEqual([]);
+  expect(zIndexOffsets()).toEqual({
+    "Enfield 1-1": 100000,
+    "Enfield 1-2": 100000,
+    "Tank 3": 0,
+  });
+  // Statics belong to no flight and keep their plain circle.
+  const [hangar] = mockCircleMarker.mock.calls.at(-1)!;
+  expect(hangar.pathOptions.fillColor).toBe(BLUE_COLOR);
+  expect(hangar.zIndexOffset).toBeUndefined();
+
+  // Deselected, the flight's markers drop back among the others.
+  act(() => {
+    store.dispatch(deselectFlight());
+  });
+  expect(zIndexOffsets()).toEqual({
+    "Enfield 1-1": 0,
+    "Enfield 1-2": 0,
+    "Tank 3": 0,
+  });
 });
