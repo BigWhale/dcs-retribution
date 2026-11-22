@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QWidget,
 )
 
 import qt_ui.uiconstants as CONST
@@ -121,7 +122,12 @@ class QTopPanel(QFrame):
         self.proceedBoxLayout = QHBoxLayout()
         if ui_flags.show_sim_speed_controls:
             self.proceedBoxLayout.addLayout(self.simSpeedControls)
-        self.proceedBoxLayout.addLayout(MaxPlayerCount(self.game_model.ato_model))
+        # A dynamic campaign has no client slots to count: the label is hidden.
+        self.max_players = QWidget()
+        max_players_layout = MaxPlayerCount(self.game_model.ato_model)
+        max_players_layout.setContentsMargins(0, 0, 0, 0)
+        self.max_players.setLayout(max_players_layout)
+        self.proceedBoxLayout.addWidget(self.max_players)
         self.proceedBoxLayout.addWidget(self.passTurnButton)
         self.proceedBoxLayout.addWidget(self.proceedButton)
         self.proceedBoxLayout.addWidget(self.companion_status)
@@ -163,6 +169,7 @@ class QTopPanel(QFrame):
 
         self.air_wing.setEnabled(True)
         self.transfers.setEnabled(True)
+        self.max_players.setVisible(not game.dynamic_campaign)
 
         self.conditionsWidget.setCurrentTurn(game.turn, game.conditions, game)
 

@@ -315,7 +315,8 @@ def companion_status(
         return "Companion: waiting for a mission on the server"
     if verdict is MissionVerdict.FOREIGN:
         return "Companion: another mission is running; waiting for this campaign's"
-    text = f"Companion: minute {snapshot.minute}, {snapshot.unit_count:,} units"
+    unit = "minute" if snapshot.minute == 1 else "minutes"
+    text = f"DCS Companion time: {snapshot.minute} {unit}"
     if verdict is MissionVerdict.OWN_AGAIN:
-        text += " (mission restarted: earlier losses stay)"
+        text += "\nMission restarted: earlier losses stay"
     return text

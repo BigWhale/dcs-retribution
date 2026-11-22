@@ -504,11 +504,16 @@ def test_lost_mission_is_not_followed() -> None:
     )
     assert (
         status(LinkStatus.RECEIVING, own, False, MissionVerdict.OWN)
-        == "Companion: minute 12, 1,234 units"
+        == "DCS Companion time: 12 minutes"
     )
     assert (
         status(LinkStatus.RECEIVING, own, False, MissionVerdict.OWN_AGAIN)
-        == "Companion: minute 12, 1,234 units (mission restarted: earlier losses stay)"
+        == "DCS Companion time: 12 minutes\nMission restarted: earlier losses stay"
+    )
+    first = snapshot("a", 1, marker, minute=1, units=1234)
+    assert (
+        status(LinkStatus.RECEIVING, first, False, MissionVerdict.OWN)
+        == "DCS Companion time: 1 minute"
     )
 
 

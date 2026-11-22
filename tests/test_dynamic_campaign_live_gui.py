@@ -283,7 +283,7 @@ def test_only_own_mission_followed(
     )
     w = window(fake)
 
-    w.wait_for(lambda: w.link.status_text() == "Companion: minute 3, 0 units")
+    w.wait_for(lambda: w.link.status_text() == "DCS Companion time: 3 minutes")
     own = LiveStateContext.get()
     assert own is not None and own.minute == 3
     assert following(game)
@@ -307,7 +307,7 @@ def test_only_own_mission_followed(
     assert clock.now(time.monotonic() + 60.0) == held_at  # a minute on, no later
 
     own_gate.set()
-    w.wait_for(lambda: w.link.status_text() == "Companion: minute 5, 0 units")
+    w.wait_for(lambda: w.link.status_text() == "DCS Companion time: 5 minutes")
     assert following(game)
     assert game.live.tick is not None and game.live.tick.minute == 5
     wall = time.monotonic()
@@ -876,6 +876,7 @@ def test_restore_button_states(
     button = panel.restore_button
     assert button.text() == "Restore mission"
     assert not button.isVisibleTo(panel), "before Begin Campaign"
+    assert not panel.max_players.isVisibleTo(panel), "no client slots to count"
 
     panel.passTurnButton.click()
     assert game.turn == 1
@@ -933,7 +934,7 @@ def test_restore_while_followed(
         autosave.unlink(missing_ok=True)  # live losses saved the first cursor
         marker = game.live.marker
         followed_status = panel.companion_status.text()
-        assert followed_status == "Companion: minute 3, 0 units"
+        assert followed_status == "DCS Companion time: 3 minutes"
         maps = len(w.live_maps())
 
         panel.restore_button.click()
