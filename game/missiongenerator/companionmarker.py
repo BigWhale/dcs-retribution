@@ -14,18 +14,27 @@ from game.companionlink.liverecord import MARKER_PREFIX
 if TYPE_CHECKING:
     from game import Game
 
-#: How far inside the map's south-west corner the marker stands.
+#: How far inside the map's corner of least x and y the marker stands.
 MARKER_INSET_M = 1000.0
 
 
 def add_mission_marker(mission: Mission, game: Game, uuid: str) -> None:
-    """Adds the marker static `MARKER_PREFIX + uuid`: a small object at the
-    map's south-west corner, of the blue coalition's country, hidden on the
-    F10 map, the planner and the MFDs."""
+    """Adds the marker static `MARKER_PREFIX + uuid`: a small object of the
+    blue coalition's country, hidden on the F10 map, the planner and the MFDs.
+
+    It stands just inside the terrain's corner of least x (south) and least y
+    (west). pydcs's `bounds` give `top` and `bottom` either way round
+    (`bottom` is the greater x on Persian Gulf, Syria, Normandy, Sinai and
+    Kola), and the Mariana Islands' greatest x is a placeholder (10,000 km),
+    so the corner is taken as the least of each pair, which is a real edge on
+    every terrain.
+    """
     name = MARKER_PREFIX + uuid
     bounds = game.theater.terrain.bounds
     position = Point(
-        bounds.bottom + MARKER_INSET_M, bounds.left + MARKER_INSET_M, mission.terrain
+        min(bounds.top, bounds.bottom) + MARKER_INSET_M,
+        min(bounds.left, bounds.right) + MARKER_INSET_M,
+        mission.terrain,
     )
     blue = mission.coalition["blue"]
     country = blue.country_by_id(game.blue.faction.country.id) or next(

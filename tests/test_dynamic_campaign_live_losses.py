@@ -20,10 +20,14 @@ import pickle
 import pickletools
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from types import SimpleNamespace
+from typing import Any, Callable, cast
 
+import dcs.terrain
 import pytest
 from dcs import Mission
+from dcs.mapping import Point
+from dcs.terrain.terrain import Terrain
 
 from game import persistency
 from game.ato.flight import Flight
@@ -40,6 +44,7 @@ from game.companionlink.snapshot import LiveSnapshot, LiveUnit
 from game.dcs.groundunittype import GroundUnitType
 from game.game import Game
 from game.migrator import Migrator
+from game.missiongenerator.companionmarker import add_mission_marker
 from game.sim.missionsimulation import MissionSimulation
 from game.squadrons import Pilot
 from game.theater import ControlPoint, TheaterUnit
@@ -124,6 +129,7 @@ def test_starting_mission_has_marker_and_name_map(started: Started) -> None:
     [(group, _)] = markers
     assert group.hidden
     assert group.hidden_on_planner
+    assert within_bounds(group.units[0].position, mission.terrain)
     assert len([u for _, u in statics if str(u.name).startswith(MARKER_PREFIX)]) == 1
 
     name_map = written_map(started)
@@ -144,6 +150,41 @@ def test_starting_mission_has_marker_and_name_map(started: Started) -> None:
     planned = name_map.flight_units(started.planned)
     assert len(planned) == 2
     assert all(name_map.aircraft[n].pilot is not None for n in planned)
+
+
+def within_bounds(position: Point, terrain: Terrain) -> bool:
+    """Inside the terrain's bounds, whichever way round pydcs gives them."""
+    b = terrain.bounds
+    return min(b.top, b.bottom) < position.x < max(b.top, b.bottom) and min(
+        b.left, b.right
+    ) < position.y < max(b.left, b.right)
+
+
+#: Every terrain pydcs ships; each makes itself with no arguments.
+TERRAINS: list[Callable[[], Terrain]] = [
+    t
+    for t in vars(dcs.terrain).values()
+    if isinstance(t, type) and issubclass(t, Terrain) and t is not Terrain
+]
+
+
+@pytest.mark.parametrize("terrain_type", TERRAINS, ids=lambda t: t.__name__)
+def test_marker_stands_inside_every_terrain(
+    terrain_type: Callable[[], Terrain],
+) -> None:
+    terrain = terrain_type()
+    mission = Mission(terrain)
+    usa = mission.country("USA")
+    game = SimpleNamespace(
+        theater=SimpleNamespace(terrain=terrain),
+        blue=SimpleNamespace(faction=SimpleNamespace(country=usa)),
+    )
+
+    add_mission_marker(mission, cast(Game, game), "uuid")
+
+    [group] = usa.static_group
+    assert str(group.units[0].name) == MARKER_PREFIX + "uuid"
+    assert within_bounds(group.units[0].position, terrain)
 
 
 #: The game's own objects, which the save already pickles; the name map may
