@@ -91,20 +91,32 @@ class LiveLosses(QObject):
         entries = game.live.ready(CHUNK)
         if not entries:
             return
+        first, last = entries[0].seq, entries[-1].seq
         started = time.perf_counter()
-        batch = apply_entries(game, entries)
-        for flight in batch.finished:
-            self._remove(flight, stranded=False, events=batch.events)
-        for flight in batch.stranded:
-            game.message(
-                f"{flight} not launched",
-                f"{flight.departure.name} was captured; the flight is removed from its "
-                "package.",
+        batch: Optional[LiveBatch] = None
+        try:
+            batch = apply_entries(game, entries)
+            self._remove_flights(game, batch)
+        except Exception:
+            # One bad entry must not wedge the campaign: the chunk is skipped,
+            # visibly, and the cursor moves on.
+            log.exception(
+                "Live losses: applying entries %d..%d failed; skipped", first, last
             )
-            self._remove(flight, stranded=True, events=batch.events)
-        settle(game, batch)
-        EventStream.put_nowait(batch.events)
-        game.live.applied(entries[-1].seq)
+            failed = True
+        else:
+            failed = False
+        try:
+            if batch is not None:
+                settle(game, batch)
+                EventStream.put_nowait(batch.events)
+        finally:
+            game.live.applied(last)
+            # Whatever is left (a full chunk, or entries behind one to drop)
+            # waits for the next turn of the event loop.
+            QTimer.singleShot(0, self._drain)
+        if failed or batch is None:
+            return
         ms = (time.perf_counter() - started) * 1000
         line = (
             f"Live losses: {batch.entries} entries, {len(batch.dead)} dead, "
@@ -114,9 +126,18 @@ class LiveLosses(QObject):
         log.info(line)
         if ms > SLOW_MS:
             log.warning(line)
-        # Whatever is left (a full chunk, or entries behind one to drop) waits
-        # for the next turn of the event loop.
-        QTimer.singleShot(0, self._drain)
+
+    def _remove_flights(self, game: Game, batch: LiveBatch) -> None:
+        """The batch's finished and stranded flights leave the ATO."""
+        for flight in batch.finished:
+            self._remove(flight, stranded=False, events=batch.events)
+        for flight in batch.stranded:
+            game.message(
+                f"{flight} not launched",
+                f"{flight.departure.name} was captured; the flight is removed from "
+                "its package.",
+            )
+            self._remove(flight, stranded=True, events=batch.events)
 
     def _remove(self, flight: Flight, stranded: bool, events: GameUpdateEvents) -> None:
         """Removes the flight through the ATO's models, or when the package
