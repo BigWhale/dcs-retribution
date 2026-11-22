@@ -2,7 +2,7 @@
 
 import logging
 from copy import deepcopy
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 from PySide6.QtCore import (
     QItemSelectionModel,
@@ -35,28 +35,11 @@ from game.server import EventStream
 from game.sim import GameUpdateEvents
 from .QLabeledWidget import QLabeledWidget
 from ..delegates import TwoColumnRowDelegate
+from ..flightlauncher import FlightLauncher, flight_locked, package_locked
 from ..models import AtoModel, GameModel, NullListModel, PackageModel
-
-if TYPE_CHECKING:
-    from qt_ui.flightlauncher import FlightLauncher
 
 #: The mark of a dynamic campaign's flight that spawned in the live mission.
 IN_FLIGHT = "In Flight"
-
-
-def flight_locked(flight: Flight, launcher: Optional["FlightLauncher"]) -> bool:
-    """Whether a dynamic campaign's flight is in flight or on its way there.
-
-    Such a flight can be neither edited nor cancelled.
-    """
-    if not flight.coalition.game.dynamic_campaign:
-        return False
-    return flight.launched or (launcher is not None and launcher.is_busy(flight))
-
-
-def package_locked(package: Package, launcher: Optional["FlightLauncher"]) -> bool:
-    """Whether a package holds a flight that is in flight or on its way there."""
-    return any(flight_locked(f, launcher) for f in package.flights)
 
 
 class FlightDelegate(TwoColumnRowDelegate):
@@ -101,7 +84,7 @@ class QFlightList(QListView):
         self,
         game_model: GameModel,
         package_model: Optional[PackageModel],
-        launcher: Optional["FlightLauncher"] = None,
+        launcher: Optional[FlightLauncher] = None,
     ) -> None:
         super().__init__()
         self.game_model = game_model
@@ -219,7 +202,7 @@ class QFlightPanel(QGroupBox):
         self,
         game_model: GameModel,
         package_model: Optional[PackageModel] = None,
-        launcher: Optional["FlightLauncher"] = None,
+        launcher: Optional[FlightLauncher] = None,
     ) -> None:
         super().__init__("Flights")
         self.game_model = game_model
@@ -286,7 +269,7 @@ class QFlightPanel(QGroupBox):
 
         A dynamic campaign's flight that is in flight or on its way there can
         be cloned but neither edited, cancelled nor launched again; Launch is
-        shown in a dynamic campaign only.
+        shown in a dynamic campaign only, enabled while the link receives.
         """
         index = self.flight_list.currentIndex()
         enabled = index.isValid()
@@ -298,8 +281,9 @@ class QFlightPanel(QGroupBox):
         dynamic = (
             self.launcher is not None and game is not None and game.dynamic_campaign
         )
+        receiving = self.launcher is not None and self.launcher.receiving
         self.launch_button.setVisible(dynamic)
-        self.launch_button.setEnabled(dynamic and enabled and not locked)
+        self.launch_button.setEnabled(dynamic and receiving and enabled and not locked)
         delete_text = "Cancel"
         if enabled and (flight := self.flight_list.selected_item) is not None:
             if not flight.state.cancelable:
@@ -392,7 +376,7 @@ class QPackageList(QListView):
         self,
         game_model: GameModel,
         model: AtoModel,
-        launcher: Optional["FlightLauncher"] = None,
+        launcher: Optional[FlightLauncher] = None,
     ) -> None:
         super().__init__()
         self.ato_model = model
@@ -506,7 +490,7 @@ class QPackagePanel(QGroupBox):
         self,
         game_model: GameModel,
         ato_model: AtoModel,
-        launcher: Optional["FlightLauncher"] = None,
+        launcher: Optional[FlightLauncher] = None,
     ) -> None:
         super().__init__("Packages")
         self.ato_model = ato_model
@@ -612,7 +596,7 @@ class QAirTaskingOrderPanel(QSplitter):
     """
 
     def __init__(
-        self, game_model: GameModel, launcher: Optional["FlightLauncher"] = None
+        self, game_model: GameModel, launcher: Optional[FlightLauncher] = None
     ) -> None:
         super().__init__(Qt.Orientation.Vertical)
         self.game_model = game_model
@@ -640,6 +624,7 @@ class QAirTaskingOrderPanel(QSplitter):
             launcher.launch_started.connect(self.on_launch_changed)
             launcher.launched.connect(self.on_launch_changed)
             launcher.launch_failed.connect(self.on_launch_changed)
+            launcher.receiving_changed.connect(self.on_launch_changed)
 
     def on_launch_changed(self, *_args: object) -> None:
         """A flight's launch began or ended: redraws the ATO and its buttons."""

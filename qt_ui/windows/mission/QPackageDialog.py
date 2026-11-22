@@ -24,6 +24,7 @@ from game.radio.radios import RadioFrequency
 from game.server import EventStream
 from game.sim import GameUpdateEvents
 from game.theater.missiontarget import MissionTarget
+from qt_ui.flightlauncher import FlightLauncher, flight_locked, package_locked
 from qt_ui.models import GameModel, PackageModel
 from qt_ui.uiconstants import EVENT_ICONS
 from qt_ui.widgets.QFrequencyWidget import QFrequencyWidget
@@ -137,8 +138,9 @@ class QPackageDialog(QDialog):
         self.delete_flight_button = QPushButton("Delete Selected")
         self.delete_flight_button.setProperty("style", "btn-danger")
         self.delete_flight_button.clicked.connect(self.on_delete_flight)
-        self.delete_flight_button.setEnabled(model.rowCount() > 0)
         self.button_layout.addWidget(self.delete_flight_button)
+        self.has_selection = model.rowCount() > 0
+        self.update_delete_buttons()
 
         self.auto_create_button = QPushButton("Auto Create")
         self.auto_create_button.setDisabled(len(list(self.package_model.flights)) > 0)
@@ -159,6 +161,14 @@ class QPackageDialog(QDialog):
         self.accepted.connect(self.on_save)
         self.finished.connect(self.on_close)
         self.rejected.connect(self.on_cancel)
+
+        # A dynamic campaign's flight in flight or on its way there can be
+        # neither deleted nor edited here, nor its package deleted.
+        launcher = FlightLauncher.current()
+        if launcher is not None:
+            launcher.launch_started.connect(self.update_delete_buttons)
+            launcher.launched.connect(self.update_delete_buttons)
+            launcher.launch_failed.connect(self.update_delete_buttons)
 
     @property
     def game(self) -> Game:
@@ -203,7 +213,15 @@ class QPackageDialog(QDialog):
         self, selected: QItemSelection, _deselected: QItemSelection
     ) -> None:
         """Updates the state of the delete button."""
-        self.delete_flight_button.setEnabled(not selected.empty())
+        self.has_selection = not selected.empty()
+        self.update_delete_buttons()
+
+    def update_delete_buttons(self, *_args: object) -> None:
+        """Delete Selected only for a selection that is not a flight in flight
+        nor on its way there."""
+        flight = self.package_view.selected_item
+        locked = flight is not None and flight_locked(flight)
+        self.delete_flight_button.setEnabled(self.has_selection and not locked)
 
     def on_add_flight(self) -> None:
         """Opens the new flight dialog."""
@@ -238,6 +256,8 @@ class QPackageDialog(QDialog):
         flight = self.package_view.selected_item
         if flight is None:
             logging.error(f"Cannot delete flight when no flight is selected.")
+            return
+        if flight_locked(flight):
             return
         self.package_model.cancel_or_abort_flight(flight)
         if len(list(self.package_model.flights)) == 0:
@@ -291,6 +311,10 @@ class QPackageDialog(QDialog):
         """
         # Validate the package has more than just escort flights but allow empty packages
         if len(self.package_model.package.flights) == 0:
+            return True
+        # A dynamic campaign's package with a flight in flight or on its way
+        # there stays as it is: its flights cannot be deleted.
+        if package_locked(self.package_model.package):
             return True
         if any(
             flight.flight_type.name not in {"ESCORT", "SEAD_ESCORT"}
@@ -378,14 +402,26 @@ class QEditPackageDialog(QPackageDialog):
         self.delete_button.setProperty("style", "btn-danger")
         self.delete_button.clicked.connect(self.on_delete)
         self.button_layout.addWidget(self.delete_button)
+        self.update_delete_buttons()
 
         self.done_button = QPushButton("Done")
         self.done_button.setProperty("style", "start-button")
         self.done_button.clicked.connect(self.accept)
         self.button_layout.addWidget(self.done_button)
 
+    def update_delete_buttons(self, *_args: object) -> None:
+        """Delete package only while no flight of it is in flight or on its
+        way there."""
+        super().update_delete_buttons()
+        if hasattr(self, "delete_button"):
+            self.delete_button.setEnabled(
+                not package_locked(self.package_model.package)
+            )
+
     def on_delete(self) -> None:
         """Removes the viewed package from the ATO."""
+        if package_locked(self.package_model.package):
+            return
         # The ATO model returns inventory for us when deleting a package.
         self.ato_model.cancel_or_abort_package(self.package_model.package)
         self.close()

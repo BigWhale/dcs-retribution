@@ -63,6 +63,19 @@ class CommandError(Exception):
         return f"the companion answered {self.status}: {self.message}"
 
 
+class SpawnFailed(CommandError):
+    """A spawn the companion gave up on: its status is `failed` or `despawned`."""
+
+
+class SpawnPending(CommandError):
+    """A spawn not yet `spawned` when the wait ran out; it may still spawn."""
+
+    def __init__(self, message: str, last_status: Optional[str]) -> None:
+        super().__init__(None, message)
+        #: The spawn's status at the last look ("waiting", "unknown", ...).
+        self.last_status = last_status
+
+
 class CompanionCommands:
     def __init__(self, address: str, token: str, timeout: float = 10.0) -> None:
         self._address = address.rstrip("/")
@@ -101,9 +114,10 @@ class CompanionCommands:
     ) -> None:
         """Returns once the spawn is `spawned`.
 
-        Raises CommandError when it is `failed` or `despawned` (with the
-        companion's reason), or still not spawned after `limit` seconds
-        (status None).
+        Raises SpawnFailed when it is `failed` or `despawned` (with the
+        companion's reason), SpawnPending when it is still not spawned after
+        `limit` seconds, CommandError when the companion cannot be asked or
+        refuses; all of them CommandError, the first two with status None.
         """
         deadline = time.monotonic() + limit
         while True:
@@ -117,13 +131,13 @@ class CompanionCommands:
                 message = f"spawn {spawn_id} {status}"
                 if reason:
                     message += f": {reason}"
-                raise CommandError(None, self._clean(message))
+                raise SpawnFailed(None, self._clean(message))
             left = deadline - time.monotonic()
             if left <= 0:
-                raise CommandError(
-                    None,
+                raise SpawnPending(
                     f"spawn {spawn_id} not spawned within {limit:g} s "
                     f"(still {status})",
+                    None if status is None else str(status),
                 )
             time.sleep(min(poll, left))
 

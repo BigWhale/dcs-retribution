@@ -63,6 +63,9 @@ def set_position(
     flight = game.db.flights.get(flight_id)
     if waypoint_idx == 0:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+    if game.dynamic_campaign and flight.launched:
+        # In flight in the live mission: its route cannot change any more.
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
 
     waypoint = flight.flight_plan.waypoints[waypoint_idx - 1]
     waypoint.position = Point.from_latlng(

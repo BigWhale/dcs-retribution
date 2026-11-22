@@ -8,6 +8,12 @@ followed to `spawned` on a worker thread. The result comes back to the GUI
 thread by a queued signal: a spawned flight is marked launched ("In Flight"),
 a failed one waits for the user to press Launch again.
 
+A spawn the companion has accepted but not yet confirmed keeps its flight
+busy (not due, not editable, no Launch) while the worker follows it, up to
+`CONFIRM_CAP_S`: launching it again could put a second group in the mission.
+Only a spawn that failed, a refusal or a lost companion fails the flight, and
+a spawn still unconfirmed at the cap, with a message that it may yet appear.
+
 Each flight is launched at most once at a time; several flights may be on
 their way at once. The ids and names handed out belong to one mission (the
 snapshot's boot and session) and start afresh with a new mission.
@@ -17,13 +23,19 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Optional
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 
 from game import Game
 from game.ato.flight import Flight
-from game.companionlink.commands import CompanionCommands, SpawnRequest
+from game.ato.package import Package
+from game.companionlink.commands import (
+    CompanionCommands,
+    SpawnPending,
+    SpawnRequest,
+)
 from game.companionlink.flightspawn import (
     IdAllocator,
     generate_flight_table,
@@ -39,6 +51,35 @@ log = logging.getLogger(__name__)
 
 #: How often the launcher looks for due flights, in milliseconds.
 CHECK_INTERVAL_MS = 1000
+#: After this many seconds without `spawned` a launch is logged as late; the
+#: worker keeps following it.
+CONFIRM_WARN_S = 30.0
+#: After this many seconds without `spawned` the launch fails (unconfirmed).
+CONFIRM_CAP_S = 300.0
+#: How often the worker asks for the spawn's status, in seconds.
+CONFIRM_POLL_S = 0.5
+
+
+def flight_locked(flight: Flight, launcher: Optional[FlightLauncher] = None) -> bool:
+    """Whether a dynamic campaign's flight is in flight or on its way there.
+
+    Such a flight can be neither edited nor deleted. `launcher` defaults to
+    the window's launcher (`FlightLauncher.current()`).
+    """
+    if not flight.coalition.game.dynamic_campaign:
+        return False
+    if flight.launched:
+        return True
+    launcher = launcher or FlightLauncher.current()
+    return launcher is not None and launcher.is_busy(flight)
+
+
+def package_locked(package: Package, launcher: Optional[FlightLauncher] = None) -> bool:
+    """Whether a package holds a flight that is in flight or on its way there.
+
+    Such a package cannot be deleted.
+    """
+    return any(flight_locked(f, launcher) for f in package.flights)
 
 
 class FlightLauncher(QObject):
@@ -48,6 +89,11 @@ class FlightLauncher(QObject):
     launch_failed = Signal(object, str)
     #: A Flight whose launch began (it is busy now), on the GUI thread.
     launch_started = Signal(object)
+    #: Whether flights can be launched now (the link is receiving).
+    receiving_changed = Signal(bool)
+
+    #: The launcher of the main window, for UI that cannot be handed one.
+    _current: Optional[FlightLauncher] = None
 
     # From a worker thread: (epoch, flight, spawn id, error or None).
     _spawn_done = Signal(object, object, object, object)
@@ -56,7 +102,11 @@ class FlightLauncher(QObject):
         self, link: CompanionLinkController, parent: Optional[QObject] = None
     ) -> None:
         super().__init__(parent)
+        FlightLauncher._current = self
         self._link = link
+        self.confirm_warn_s = CONFIRM_WARN_S
+        self.confirm_cap_s = CONFIRM_CAP_S
+        self.confirm_poll_s = CONFIRM_POLL_S
         self._status = LinkStatus.WAITING
         link.status_changed.connect(self._on_link_status)
         self._game: Optional[Game] = None
@@ -77,6 +127,17 @@ class FlightLauncher(QObject):
         # the connection type wrong.)
         queued = Qt.ConnectionType.QueuedConnection
         self._spawn_done.connect(self._on_spawn_done, queued)  # type: ignore[arg-type]
+
+    @classmethod
+    def current(cls) -> Optional[FlightLauncher]:
+        """The most recently made launcher (the main window's), if any."""
+        return cls._current
+
+    @property
+    def receiving(self) -> bool:
+        """Whether the link is receiving the live mission, so a flight can be
+        launched."""
+        return self._status is LinkStatus.RECEIVING
 
     def set_game(self, game: Game | None) -> None:
         """Follows the game on screen: checks every second for a dynamic game.
@@ -186,6 +247,9 @@ class FlightLauncher(QObject):
                 request,
                 liberation_install.companion_command_address(),
                 liberation_install.companion_command_token(),
+                self.confirm_warn_s,
+                self.confirm_cap_s,
+                self.confirm_poll_s,
             ),
             name=f"launch {request.name}",
             daemon=True,
@@ -199,14 +263,40 @@ class FlightLauncher(QObject):
         request: SpawnRequest,
         address: str,
         token: str,
+        warn_s: float,
+        cap_s: float,
+        poll_s: float,
     ) -> None:
-        """On a worker thread: sends the spawn and follows it to `spawned`."""
+        """On a worker thread: sends the spawn and follows it to `spawned`.
+
+        A spawn still waiting after `warn_s` is logged and followed on, up to
+        `cap_s` in all; the flight stays busy all that time.
+        """
         spawn_id: Optional[str] = None
         error: Optional[str] = None
         try:
             commands = CompanionCommands(address, token)
             spawn_id = commands.spawn(request)
-            commands.wait_spawned(spawn_id)
+            asked = time.monotonic()
+            try:
+                commands.wait_spawned(spawn_id, limit=warn_s, poll=poll_s)
+            except SpawnPending as late:
+                log.warning(
+                    "Launch: %r (spawn %s) not spawned after %g s (still %s); "
+                    "following it up to %g s",
+                    request.name,
+                    spawn_id,
+                    warn_s,
+                    late.last_status,
+                    cap_s,
+                )
+                left = cap_s - (time.monotonic() - asked)
+                commands.wait_spawned(spawn_id, limit=max(left, 0.0), poll=poll_s)
+        except SpawnPending as e:
+            error = (
+                f"spawn {spawn_id} was not confirmed within {cap_s:g} s "
+                f"(still {e.last_status}); it may still appear in the mission"
+            )
         except Exception as e:
             error = _text(e)
         self._spawn_done.emit(epoch, flight, spawn_id, error)
@@ -247,7 +337,10 @@ class FlightLauncher(QObject):
 
     @Slot(object)
     def _on_link_status(self, status: LinkStatus) -> None:
+        was = self.receiving
         self._status = status
+        if self.receiving != was:
+            self.receiving_changed.emit(self.receiving)
 
 
 def _text(e: Exception) -> str:

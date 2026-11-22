@@ -4,6 +4,7 @@ from typing import Optional
 
 from game.ato.flight import Flight
 from game.theater.missiontarget import MissionTarget
+from .flightlauncher import flight_locked
 from .models import GameModel, PackageModel
 from .windows.mission.QEditFlightDialog import QEditFlightDialog
 from .windows.mission.QPackageDialog import (
@@ -52,7 +53,12 @@ class Dialog:
     def open_edit_flight_dialog(
         cls, package_model: PackageModel, flight: Flight, parent=None
     ) -> None:
-        """Opens the dialog to edit the given flight."""
+        """Opens the dialog to edit the given flight.
+
+        Not for a dynamic campaign's flight in flight or on its way there.
+        """
+        if flight_locked(flight):
+            return
         cls.edit_flight_dialog = QEditFlightDialog(
             cls.game_model, package_model, flight, parent=parent
         )

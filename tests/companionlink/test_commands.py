@@ -18,7 +18,13 @@ from typing import Any, Iterator, Optional
 
 import pytest
 
-from game.companionlink.commands import CommandError, CompanionCommands, SpawnRequest
+from game.companionlink.commands import (
+    CommandError,
+    CompanionCommands,
+    SpawnFailed,
+    SpawnPending,
+    SpawnRequest,
+)
 
 TOKEN = "tok-c"
 
@@ -194,6 +200,28 @@ def test_wait_spawned(fake: FakeCommands) -> None:
     with pytest.raises(CommandError) as missing:
         commands.spawn_status("s-2")
     assert missing.value.status == 404
+
+
+def test_wait_spawned_tells_pending_from_failed(fake: FakeCommands) -> None:
+    """A spawn still waiting at the limit may yet spawn; a failed one never."""
+    commands = CompanionCommands(fake.address, TOKEN)
+
+    fake.statuses = ["waiting"]
+    with pytest.raises(SpawnPending) as pending:
+        commands.wait_spawned("s-1", limit=0.1, poll=0.01)
+    assert pending.value.last_status == "waiting"
+    assert "not spawned within" in str(pending.value)
+
+    fake.statuses = ["despawned"]
+    with pytest.raises(SpawnFailed) as gone:
+        commands.wait_spawned("s-1", limit=3.0, poll=0.01)
+    assert not isinstance(gone.value, SpawnPending)
+    assert "despawned" in gone.value.message
+
+    fake.statuses = ["waiting", "spawned"]
+    with pytest.raises(SpawnPending):
+        commands.wait_spawned("s-1", limit=0.0, poll=0.01)
+    commands.wait_spawned("s-1", limit=3.0, poll=0.01)
 
 
 def test_connect_error() -> None:

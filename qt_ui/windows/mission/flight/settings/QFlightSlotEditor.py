@@ -27,6 +27,7 @@ from game.squadrons import Squadron
 from game.squadrons.pilot import Pilot
 from game.theater import ControlPoint, OffMapSpawn
 from game.utils import nautical_miles
+from qt_ui.flightlauncher import flight_locked
 from qt_ui.models import PackageModel
 
 
@@ -338,6 +339,9 @@ class QFlightSlotEditor(QGroupBox):
         self.setLayout(layout)
 
     def _change_squadron(self):
+        if flight_locked(self.flight):
+            # In flight in the live mission: it cannot be swapped out.
+            return
         dialog = QSquadronSelector(self.flight)
         if dialog.exec():
             squadron: Optional[Squadron] = dialog.selector.currentData()
