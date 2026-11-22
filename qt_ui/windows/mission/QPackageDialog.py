@@ -2,9 +2,10 @@
 
 import logging
 from datetime import datetime
+from functools import partial
 from typing import Callable, Optional
 
-from PySide6.QtCore import QDate, QDateTime, QItemSelection, QTime, Qt, Signal
+from PySide6.QtCore import QDate, QDateTime, QItemSelection, QTime, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QDateTimeEdit,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from game.ato.flight import Flight
 from game.ato.flightplans.planningerror import PlanningError
+from game.ato.airtaaskingorder import AirTaskingOrder
 from game.ato.package import Package
 from game.ato.packageschedule import keep_start, package_start_time, start_asap
 from game.game import Game
@@ -491,6 +493,15 @@ class QEditPackageDialog(QPackageDialog):
         self.done_button.clicked.connect(self.accept)
         self.button_layout.addWidget(self.done_button)
 
+        if self.dynamic:
+            # However the dialog ends (Done, its close button, a forced close,
+            # or its window dropped unclosed), a ticked ASAP starts the
+            # package now: no ASAP is left on it to slide its TOT later.
+            settle = partial(settle_asap, self.package_model, self.ato_model.ato)
+            # (PySide6 6.4's stub lacks the signals.)
+            self.finished.connect(settle)  # type: ignore[attr-defined]
+            self.destroyed.connect(settle)  # type: ignore[attr-defined]
+
     def update_delete_buttons(self, *_args: object) -> None:
         """Delete package only while no flight of it is in flight or on its
         way there."""
@@ -551,3 +562,17 @@ def show_empty(edit: QDateTimeEdit) -> None:
         edit.setDateTime(edit.minimumDateTime())
     finally:
         edit.blockSignals(blocked)
+
+
+def settle_asap(model: PackageModel, ato: AirTaskingOrder, *_args: object) -> None:
+    """A dynamic campaign's package left with ASAP ticked starts now, once.
+
+    Holds no reference to the dialog: it also runs as the dialog is destroyed.
+    The redraw waits for the event loop, after any dialog being destroyed is
+    gone.
+    """
+    package = model.package
+    if not package.auto_asap or package not in ato.packages:
+        return
+    start_asap(package, model.now())
+    QTimer.singleShot(0, lambda: model.update_tot())

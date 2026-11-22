@@ -78,10 +78,8 @@ class FlightDelegate(TwoColumnRowDelegate):
             ):
                 # The time with its date when it is not on the clock's day.
                 now = self.game_model.sim_controller.current_time_in_sim_if_game_loaded
-                waiting = state.description.removesuffix(
-                    f" at {state.start_time:%H:%M:%S}"
-                )
-                return f"{waiting.title()} At {dated_time(state.start_time, now)}"
+                waiting = f"Waiting for {state.waiting_for}".title()
+                return f"{waiting} At {dated_time(state.start_time, now)}"
             return flight.state.description.title()
         return ""
 
