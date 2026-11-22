@@ -2,10 +2,11 @@
 
 `generate_flight_table` runs Retribution's mission generator at the mission
 clock's time into a throwaway mission that holds only the flight's package,
-with the flight as an air start over its departure, and lifts the flight's
-pydcs group table out (`Group.dict()`). `prepare_spawn` then makes that table
-fit the running mission: new group and unit ids, a name the mission does not
-use, AI skills and mission times turned into the live mission's model times.
+with the flight in the start type it is launched with (on given parking slots
+for a Cold or Warm start), and lifts the flight's pydcs group table out
+(`Group.dict()`). `prepare_spawn` then makes that table fit the running
+mission: new group and unit ids, a name the mission does not use, AI skills
+and mission times turned into the live mission's model times.
 The result is the `POST /v1/spawn` request for DCS Companion.
 
 Only a dynamic campaign's launcher calls these.
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from dcs.task import TargetType
+from dcs.terrain import ParkingSlot
 from dcs.unitgroup import FlyingGroup
 
 from game.ato.flightstate import Uninitialized, WaitingForStart
@@ -69,16 +71,23 @@ class IdAllocator:
 
 
 def generate_flight_table(
-    game: Game, flight: Flight, now: datetime
+    game: Game,
+    flight: Flight,
+    now: datetime,
+    start_type: StartType = StartType.IN_FLIGHT,
+    parking: list[ParkingSlot] | None = None,
 ) -> tuple[dict[str, Any], int, str]:
     """The flight's group table, its country id and "plane" or "helicopter".
 
     Retribution's generator runs at `now` into a temporary .miz, its ATOs
-    holding only the flight's package for the time, with the flight an air
-    start (StartType.IN_FLIGHT) due at `now`, and without the parked untasked
-    aircraft. The ATOs, those two settings and the package's flights' start
-    types, states and group ids are as they were afterwards. The table has no
-    late activation: the companion spawns it when asked.
+    holding only the flight's package for the time, with the flight in
+    `start_type` due at `now`, and without the parked untasked aircraft. A
+    Cold or Warm flight from an airfield stands on `parking` (one slot per
+    aircraft) when given, else on the generator's own choice. The ATOs, those
+    two settings and the package's flights' start types, states and group ids
+    are as they were afterwards, and the flight's `parking_override` is None.
+    The table has no late activation and is not uncontrolled: the companion
+    spawns it when asked and it starts up at once.
     """
     from game.missiongenerator import MissionGenerator
 
@@ -113,7 +122,8 @@ def generate_flight_table(
                 continue
             if isinstance(f.state, Uninitialized):
                 f.state.reinitialize(now)
-        flight.start_type = StartType.IN_FLIGHT
+        flight.start_type = start_type
+        flight.parking_override = parking
         flight.set_state(WaitingForStart(flight, flight.squadron.settings, now))
         flight.group_id = 0
 
@@ -133,12 +143,14 @@ def generate_flight_table(
         ) = saved_untasked
         for ato, packages in zip(atos, saved_packages):
             ato.packages = packages
-        for f, start_type, state, group_id in saved_flights:
-            f.start_type = start_type
+        for f, saved_type, state, group_id in saved_flights:
+            f.start_type = saved_type
             f.set_state(state)
             f.group_id = group_id
+        flight.parking_override = None
 
     table.pop("lateActivation", None)
+    table.pop("uncontrolled", None)
     return table, country, category
 
 

@@ -211,6 +211,11 @@ class FlightGroupSpawner:
                             return pad_group
                 return self._generate_over_departure(name, cp)
             elif isinstance(cp, Airfield):
+                if self.flight.parking_override is not None:
+                    # A dynamic campaign's launch: the spots are chosen already.
+                    return self._generate_at_airfield(
+                        name, cp, list(self.flight.parking_override)
+                    )
                 is_heli = self.flight.squadron.aircraft.helicopter
                 if cp.has_helipads and is_heli:
                     pad_group = self._generate_at_cp_helipad(name, cp)

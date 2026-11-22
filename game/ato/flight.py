@@ -32,6 +32,8 @@ from ..sidc import (
 )
 
 if TYPE_CHECKING:
+    from dcs.terrain import ParkingSlot
+
     from game.sim.gameupdateevents import GameUpdateEvents
     from game.sim.simulationresults import SimulationResults
     from game.squadrons import Squadron, Pilot
@@ -86,6 +88,9 @@ class Flight(
         self.launched = False
         # The group name it was spawned as in the live mission, once launched.
         self.live_group_name: Optional[str] = None
+        # The parking slots a dynamic campaign's launch generates the flight on,
+        # set only while `generate_flight_table` runs (None in a save).
+        self.parking_override: Optional[list[ParkingSlot]] = None
 
         self.frequency = frequency
         if self.unit_type.dcs_unit_type.tacan:
@@ -178,6 +183,8 @@ class Flight(
             state["launched"] = False
         if "live_group_name" not in state:
             state["live_group_name"] = None
+        if "parking_override" not in state:
+            state["parking_override"] = None
         self.__dict__.update(state)
         if isinstance(self.roster, FlightRoster):
             self.roster = FlightMembers.from_roster(self, self.roster)
