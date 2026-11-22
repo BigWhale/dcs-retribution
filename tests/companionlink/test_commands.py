@@ -1,8 +1,9 @@
 """The client of DCS Companion's command port, against a fake companion.
 
-The fake answers `POST /v1/spawn` and `GET /v1/spawns/{id}` from a real HTTP
-server on 127.0.0.1 as the companion does (`docs/reference/campaign.md`,
-Command port): `202 {"id":"s-1"}`, the spawn record under `spawn`, errors as
+The fake answers `POST /v1/spawn`, `GET /v1/spawns/{id}` and `POST /v1/despawn`
+from a real HTTP server on 127.0.0.1 as the companion does
+(`docs/reference/campaign.md`, Command port): `202 {"id":"s-1"}`, the spawn
+record under `spawn`, a despawn's `group` and `units`, errors as
 `{"error": "..."}` and a wrong token `401`.
 """
 
@@ -24,6 +25,7 @@ from game.companionlink.commands import (
     SpawnFailed,
     SpawnPending,
     SpawnRequest,
+    despawn_and_spawn,
 )
 
 TOKEN = "tok-c"
@@ -47,6 +49,12 @@ class FakeCommands:
         #: The statuses GET /v1/spawns/s-1 gives, in turn; the last repeats.
         #: "http:503" answers that HTTP status with an error instead.
         self.statuses: list[str] = []
+        #: The groups POST /v1/despawn removes, with their units; others 404.
+        self.groups: dict[str, int] = {}
+        #: The status every POST /v1/despawn answers with an error, or None.
+        self.despawn_refuse: Optional[int] = None
+        #: The bodies and headers of POST /v1/despawn, in order.
+        self.despawns: list[tuple[dict[str, Any], dict[str, str]]] = []
         self.server: Optional[ThreadingHTTPServer] = None
         self.thread: Optional[threading.Thread] = None
 
@@ -66,6 +74,9 @@ class FakeCommands:
             def do_POST(self) -> None:
                 raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 if not self.authorized():
+                    return
+                if self.path == "/v1/despawn":
+                    self.despawn(json.loads(raw))
                     return
                 if self.path != "/v1/spawn":
                     self.answer(404, {"error": "not found"})
@@ -107,6 +118,29 @@ class FakeCommands:
                 self.answer(
                     200,
                     {"boot": "b1", "session": 1, "modelTime": 2401.2, "spawn": spawn},
+                )
+
+            def despawn(self, body: dict[str, Any]) -> None:
+                with fake.lock:
+                    fake.despawns.append((body, dict(self.headers)))
+                    refuse = fake.despawn_refuse
+                    name = str(body.get("name"))
+                    units = None if refuse else fake.groups.pop(name, None)
+                if refuse is not None:
+                    self.answer(refuse, {"error": "hook link down"})
+                    return
+                if units is None:
+                    self.answer(404, {"error": f"campaign_despawn: no group {name}"})
+                    return
+                self.answer(
+                    200,
+                    {
+                        "boot": "b1",
+                        "session": 1,
+                        "modelTime": 2410.5,
+                        "group": name,
+                        "units": units,
+                    },
                 )
 
             def answer(self, status: int, body: dict[str, Any]) -> None:
@@ -239,3 +273,52 @@ def test_connect_error() -> None:
     assert error.value.status is None
     assert time.monotonic() - started < 2.0
     assert TOKEN not in str(error.value)
+
+
+def test_despawn_round_trip(fake: FakeCommands) -> None:
+    fake.groups = {"Spare 1": 1}
+
+    units = CompanionCommands(fake.address, TOKEN).despawn("Spare 1")
+
+    assert units == 1
+    assert len(fake.despawns) == 1
+    body, headers = fake.despawns[0]
+    assert body == {"name": "Spare 1"}
+    assert headers["Authorization"] == f"Bearer {TOKEN}"
+    assert headers["Content-Type"] == "application/json"
+
+
+def test_despawn_gone_group_then_spawn(fake: FakeCommands) -> None:
+    """A spare already gone (404) is fine: the flight is spawned on its spot."""
+    commands = CompanionCommands(fake.address, TOKEN)
+    assert commands.despawn("Spare 1") is None
+
+    fake.groups = {"Spare 2": 2}
+    spawn_id = despawn_and_spawn(commands, ["Spare 1", "Spare 2"], request())
+
+    assert spawn_id == "s-1"
+    assert [body["name"] for body, _ in fake.despawns] == [
+        "Spare 1",
+        "Spare 1",
+        "Spare 2",
+    ]
+    assert len(fake.requests) == 1
+
+
+def test_despawn_failure_stops_before_spawn(
+    fake: FakeCommands, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A despawn that may not have happened: nothing spawns over the spare."""
+    caplog.set_level(logging.DEBUG, logger="game.companionlink")
+    commands = CompanionCommands(fake.address, TOKEN)
+    fake.groups = {"Spare 1": 1, "Spare 2": 1}
+
+    for status in (503, 504, 409):
+        fake.despawn_refuse = status
+        with pytest.raises(CommandError) as failed:
+            despawn_and_spawn(commands, ["Spare 1", "Spare 2"], request())
+        assert failed.value.status == status
+
+    assert [body["name"] for body, _ in fake.despawns] == ["Spare 1"] * 3
+    assert fake.requests == []
+    assert TOKEN not in caplog.text

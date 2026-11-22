@@ -3,7 +3,8 @@
 `POST /v1/spawn` asks the companion to spawn a group (its pydcs table) now or
 at a model time; the companion answers `202 {"id":"s-1"}` and spawns it when
 it is due. `GET /v1/spawns/{id}` gives the spawn's record, whose `status`
-tells what became of it. Errors come as `{"error": "..."}` with a fitting
+tells what became of it. `POST /v1/despawn` removes a group of the mission
+now (`200` with its `units`, `404` when there is no such group). Errors come as `{"error": "..."}` with a fitting
 status; a wrong token is `401`.
 
 Every call blocks (the launcher runs them on a worker thread) and fails with
@@ -16,7 +17,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import httpx
 
@@ -104,6 +105,31 @@ class CompanionCommands:
             len(body),
         )
         return spawn_id
+
+    def despawn(self, name: str) -> int | None:
+        """Removes the group `name` from the mission now; its units removed.
+
+        None when the mission has no such group (`404`): it is gone already.
+        Any other answer (`409` refused, `503` link down, `504` no answer in
+        time) or no answer at all raises CommandError: the group may still
+        be there.
+        """
+        resp = self._send(
+            "POST",
+            "/v1/despawn",
+            content=json.dumps({"name": name}, separators=(",", ":")).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        if resp.status_code == 404:
+            log.info("companion despawn: no group %r, gone already", name)
+            return None
+        if resp.status_code != 200:
+            raise self._refusal(resp)
+        units = self._json(resp).get("units")
+        if not isinstance(units, int) or isinstance(units, bool):
+            raise CommandError(resp.status_code, "the despawn answer has no units")
+        log.info("companion despawned: %r, %d units", name, units)
+        return units
 
     def spawn_status(self, spawn_id: str) -> str:
         """The spawn's status: waiting, unknown, spawned, failed or despawned."""
@@ -210,3 +236,18 @@ class CompanionCommands:
         if self._token:
             return message.replace(self._token, "<token>")
         return message
+
+
+def despawn_and_spawn(
+    commands: CompanionCommands, despawn: Sequence[str], request: SpawnRequest
+) -> str:
+    """Despawns each group of `despawn` in order, then asks for the spawn; its id.
+
+    The spare planes on a ground start's spots go before the flight is spawned
+    on them. A group already gone is fine; any other despawn failure raises
+    its CommandError before the spawn is asked, so nothing is spawned over a
+    plane that may still stand there.
+    """
+    for name in despawn:
+        commands.despawn(name)
+    return commands.spawn(request)
