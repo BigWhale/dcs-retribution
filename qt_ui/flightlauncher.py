@@ -27,8 +27,9 @@ on the GUI thread: it touches the theater's pydcs airport). The worker despawns
 those spares before it asks for the spawn; a despawn that fails (other than a
 group already gone) fails the launch before anything is spawned. Without
 enough spots the flight starts in the air, with a warning in the log. The
-spots and spares are claimed (`ParkingClaims`) before the worker starts, so a
-second launch at the field within a snapshot's age takes others.
+spots and spares are claimed (`ParkingClaims`) before the worker starts and
+held while the launch is on its way and a snapshot's age after, so a second
+launch at the field takes others.
 
 Each flight is launched at most once at a time; several flights may be on
 their way at once. The ids, names and parking claims handed out belong to one
@@ -83,9 +84,10 @@ CONFIRM_WARN_S = 30.0
 CONFIRM_CAP_S = 300.0
 #: How often the worker asks for the spawn's status, in seconds.
 CONFIRM_POLL_S = 0.5
-#: A launch's spots are claimed until this long after the mission clock's now
-#: (one snapshot period): the clock between snapshots is a wall-clock estimate,
-#: and a snapshot taken before the spawn lands must not free them.
+#: A launch's spots are claimed while it is on its way, then until this long
+#: after the mission clock's now as it ends (one snapshot period): the clock
+#: between snapshots is a wall-clock estimate, and a snapshot taken before the
+#: spawn landed must not free them.
 CLAIM_AHEAD_S = 60.0
 
 
@@ -276,7 +278,7 @@ class FlightLauncher(QObject):
 
         despawn: list[str] = []
         if plan is not None:
-            self._parking.claim(plan, model_time + CLAIM_AHEAD_S)
+            self._parking.claim(plan, flight)
             despawn = list(plan.despawn)
             log.info(
                 "Launch: %s starts %s at %s on %s; despawning first: %s",
@@ -430,18 +432,29 @@ class FlightLauncher(QObject):
             else:
                 self._fail(flight, f"{flight} was not launched: {error}")
             return
-        self._in_progress.discard(flight)
+        self._end_launch(flight)
         flight.launched = True
         flight.live_group_name = self._sent_as.pop(flight, None)
         log.info("Launch: %s is in flight (spawn %s)", flight, spawn_id)
         self.launched.emit(flight)
 
     def _fail(self, flight: Flight, message: str) -> None:
-        self._in_progress.discard(flight)
+        self._end_launch(flight)
         self._sent_as.pop(flight, None)
         self._failed.add(flight)
         log.warning("Launch failed: %s", message)
         self.launch_failed.emit(flight, message)
+
+    def _end_launch(self, flight: Flight) -> None:
+        """The flight is no longer on its way: its parking claims hold on a
+        snapshot's age from now."""
+        self._in_progress.discard(flight)
+        model_time = LiveStateContext.clock().model_time()
+        if model_time is None:
+            # No mission clock (a new mission comes): the claims stay held
+            # until the mission is forgotten.
+            return
+        self._parking.release(flight, model_time + CLAIM_AHEAD_S)
 
     def _forget_mission(self) -> None:
         self._mission = None

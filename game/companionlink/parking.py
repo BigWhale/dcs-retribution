@@ -8,8 +8,8 @@ the type. The snapshot's `x`/`y` are map metres in pydcs's frame (`x` north,
 are.
 
 The snapshot can be a minute old, so the launcher keeps one `ParkingClaims` per
-mission: a launch's slots and despawned groups are not used again until a
-snapshot newer than the launch shows the field.
+mission: a launch's slots and despawned groups are not used again while the
+launch is on its way, nor until a snapshot newer than its end shows the field.
 
 Only a dynamic campaign's launcher calls these.
 """
@@ -17,8 +17,9 @@ Only a dynamic campaign's launcher calls these.
 from __future__ import annotations
 
 import math
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Hashable, Iterable
 from dataclasses import dataclass
+from typing import Optional
 
 from dcs.terrain import Airport
 from dcs.terrain.terrain import ParkingSlot
@@ -39,34 +40,46 @@ class ParkingPlan:
     despawn: list[str]  # spare group names to despawn, in slot order
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Claim:
+    holder: Hashable
     airport_id: int
     slots: frozenset[int]  # crossroad_idx
     despawn: frozenset[str]
-    model_time: float
+    # None while the launch is on its way.
+    model_time: Optional[float] = None
 
 
 class ParkingClaims:
     """The spots and spares of the launches into one mission.
 
-    A claim holds for every snapshot taken before it (`model_time` at or after
-    the snapshot's): such a snapshot cannot show the launched flight on its
-    slots nor the spares gone yet.
+    A claim holds while its launch is on its way (however late the spawn is
+    confirmed), then for every snapshot taken before the model time it is
+    released with (at or after the snapshot's): such a snapshot cannot show the
+    launched flight on its slots nor the spares gone yet.
     """
 
     def __init__(self) -> None:
         self._claims: list[_Claim] = []
 
-    def claim(self, plan: ParkingPlan, model_time: float) -> None:
+    def claim(self, plan: ParkingPlan, holder: Hashable) -> None:
+        """Claims the plan's slots and spares for `holder`'s launch, until it
+        is released."""
         self._claims.append(
             _Claim(
+                holder=holder,
                 airport_id=plan.airport_id,
                 slots=frozenset(s.crossroad_idx for s in plan.slots),
                 despawn=frozenset(plan.despawn),
-                model_time=model_time,
             )
         )
+
+    def release(self, holder: Hashable, model_time: float) -> None:
+        """`holder`'s launch ended (spawned or failed): its claims hold on for
+        the snapshots taken up to `model_time`."""
+        for c in self._claims:
+            if c.holder == holder and c.model_time is None:
+                c.model_time = model_time
 
     def claimed_slots(self, airport_id: int, snapshot: LiveSnapshot) -> set[int]:
         """The crossroad_idx of slots claimed at or after the snapshot."""
@@ -84,7 +97,11 @@ class ParkingClaims:
         return out
 
     def _held(self, snapshot: LiveSnapshot) -> Iterable[_Claim]:
-        return (c for c in self._claims if c.model_time >= snapshot.model_time)
+        return (
+            c
+            for c in self._claims
+            if c.model_time is None or c.model_time >= snapshot.model_time
+        )
 
 
 def plan_parking(

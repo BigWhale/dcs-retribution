@@ -172,7 +172,7 @@ def test_claimed_spots_and_spent_spares_skipped(airport: Airport) -> None:
     first = plan_parking(airport, F_16C_50, 3, BLUE, snapshot(units), (), claims)
     assert first is not None
     assert first.slots == [a, b, slots[0]]
-    claims.claim(first, 200.0)
+    claims.claim(first, "Uzi 1")
 
     second = plan_parking(airport, F_16C_50, 3, BLUE, snapshot(units), (), claims)
     assert second is not None
@@ -182,8 +182,21 @@ def test_claimed_spots_and_spent_spares_skipped(airport: Airport) -> None:
         s.crossroad_idx for s in second.slots
     }
 
+    # The spawn is confirmed late: newer snapshots still show the spares, and
+    # the claim holds while the launch is on its way, then up to the model
+    # time it is released with.
+    on_its_way = plan_parking(
+        airport, F_16C_50, 3, BLUE, snapshot(units, model_time=500.0), (), claims
+    )
+    assert on_its_way == second
+    claims.release("Uzi 1", 560.0)
+    released = plan_parking(
+        airport, F_16C_50, 3, BLUE, snapshot(units, model_time=560.0), (), claims
+    )
+    assert released == second
+
     later = plan_parking(
-        airport, F_16C_50, 3, BLUE, snapshot(units, model_time=260.0), (), claims
+        airport, F_16C_50, 3, BLUE, snapshot(units, model_time=561.0), (), claims
     )
     assert later == first
 
