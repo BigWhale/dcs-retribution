@@ -1,11 +1,15 @@
 """A dynamic campaign's restored mission: the newest snapshot of the campaign's
-own mission (the tick) kept in the save.
+own mission (the tick) kept in the save, and the mission written again from it.
 
 The link hands each snapshot over with its envelope compressed; the live
 record keeps the newest one whose mission is the campaign's own under the
 name map's marker, so the tick and the name map always belong to the same
 mission. The tick is saved with the game; a save from before it loads with
 none.
+
+A restore writes the campaign's mission again at the tick's minute, read back
+here with pydcs: no flights, the aircraft not in the air parked, a new marker;
+the flights are sorted from the tick and the replaced mission is retired.
 
 The games are generated headless from a campaign shipped with Retribution,
 created as the new game wizard does: the flag first, then `begin_turn_0`.
@@ -14,35 +18,67 @@ created as the new game wizard does: the flag first, then `begin_turn_0`.
 from __future__ import annotations
 
 import json
+import logging
 import pickle
 import zlib
+from collections import Counter
 from dataclasses import replace
 from datetime import datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, Mapping, Optional, Sequence, cast
 
 import pytest
+from dcs.mission import Mission
+from dcs.unitgroup import FlyingGroup
 
 from game import persistency
+from game.ato.flight import Flight
+from game.companionlink.eventlog import EventBatch, LogEntry, LogRef
 from game.companionlink.liverecord import MARKER_PREFIX, MissionVerdict
 from game.companionlink.liveunitmap import LiveUnitMap
+from game.companionlink.restore import (
+    RestoreError,
+    RestorePlacement,
+    sort_launched,
+    write_restore,
+)
 from game.companionlink.snapshot import LiveSnapshot, parse_snapshot
 from game.game import Game
 from game.migrator import Migrator
-from tests.conftest import generate_starting_mission, new_game
+from game.missiongenerator import MissionGenerator
+from game.sim.missionsimulation import MissionSimulation
+from game.squadrons import Squadron
+from game.theater import Airfield, Fob
+from tests.conftest import generate_starting_mission, new_game, plan_by_hand, squadrons
 
 CAMPAIGN = Path("resources/campaigns/golan_heights_lite.yaml")
 #: When the snapshots' missions started.
 START = datetime(2015, 6, 1, 8, 0)
+#: A coalition's `side` in a snapshot.
+SIDES = {"blue": 2, "red": 1, "neutrals": 0}
+#: A pydcs group list's `cat` in a snapshot.
+CATEGORIES = {
+    "plane_group": 0,
+    "helicopter_group": 1,
+    "vehicle_group": 2,
+    "ship_group": 3,
+}
 
 
 @pytest.fixture(scope="module")
-def begun(saved_games: Path, tmp_path_factory: pytest.TempPathFactory) -> Game:
+def start_miz(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Where Begin Campaign's mission is written."""
+    return tmp_path_factory.mktemp("mission") / "start.miz"
+
+
+@pytest.fixture(scope="module")
+def begun(saved_games: Path, start_miz: Path) -> Game:
     """Begin Campaign's game: its mission written with a marker and name map."""
     game = new_game(dynamic=True, squadrons_start_full=True, campaign_file=CAMPAIGN)
     game.pass_turn(no_action=True)
     game.live.new_marker()
-    sim = generate_starting_mission(game, tmp_path_factory.mktemp("mission"))
+    sim = generate_starting_mission(game, start_miz.parent)
     assert sim.unit_map is not None
     game.live.written(LiveUnitMap.from_generation(sim.unit_map, game))
     return game
@@ -51,7 +87,26 @@ def begun(saved_games: Path, tmp_path_factory: pytest.TempPathFactory) -> Game:
 @pytest.fixture
 def game(begun: Game) -> Game:
     """A copy of Begin Campaign's game, for a test that changes it."""
-    return cast(Game, pickle.loads(pickle.dumps(begun)))
+    return copy(begun)
+
+
+@pytest.fixture(scope="module")
+def running(begun: Game, start_miz: Path) -> Game:
+    """Begin Campaign's game with its mission running: decided the campaign's
+    own by a snapshot of its marker, kept as the tick."""
+    game = copy(begun)
+    tick_of(game, start_miz)
+    return game
+
+
+@pytest.fixture
+def own(running: Game) -> Game:
+    """A copy of the running campaign, for a test that changes it."""
+    return copy(running)
+
+
+def copy(game: Game) -> Game:
+    return cast(Game, pickle.loads(pickle.dumps(game)))
 
 
 def envelope(
@@ -229,3 +284,434 @@ def test_dynamic_autosave_is_atomic(
     unchanged = persistency.load_game(str(path))
     assert unchanged is not None and unchanged.live.tick is not None
     assert unchanged.live.tick.minute == 7
+
+
+# The restore.
+
+
+def read_miz(path: Path) -> Mission:
+    mission = Mission()
+    mission.load_file(str(path))
+    return mission
+
+
+@lru_cache(maxsize=None)
+def miz_objects(path: Path) -> tuple[tuple[dict[str, Any], ...], ...]:
+    """The groups and the statics of a written mission, as a snapshot's
+    `state.groups` and `state.statics` give them; read once per file."""
+    groups: list[dict[str, Any]] = []
+    statics: list[dict[str, Any]] = []
+    for coalition_name, coalition in read_miz(path).coalition.items():
+        side = SIDES[coalition_name]
+        for country in coalition.countries.values():
+            for attr, cat in CATEGORIES.items():
+                for group in getattr(country, attr):
+                    units = [
+                        {
+                            "name": str(u.name),
+                            "id": u.id,
+                            "type": u.type,
+                            "x": u.position.x,
+                            "y": u.position.y,
+                            "hdg": u.heading,
+                            "inAir": False,
+                        }
+                        for u in group.units
+                    ]
+                    groups.append(
+                        {
+                            "name": str(group.name),
+                            "cat": cat,
+                            "id": group.id,
+                            "side": side,
+                            "units": units,
+                        }
+                    )
+            for group in country.static_group:
+                unit = group.units[0]
+                statics.append(
+                    {
+                        "name": str(unit.name),
+                        "id": unit.id,
+                        "type": unit.type,
+                        "side": side,
+                        "x": unit.position.x,
+                        "y": unit.position.y,
+                        "hdg": unit.heading,
+                        "exists": not group.dead,
+                    }
+                )
+    return tuple(groups), tuple(statics)
+
+
+def snapshot_of(
+    game: Game,
+    miz: Path,
+    *,
+    boot: str = "b1",
+    moved: Mapping[str, tuple[float, float, float]] = {},
+    in_air: frozenset[str] | set[str] = frozenset(),
+    launched: Sequence[Flight] = (),
+    at: Optional[datetime] = None,
+) -> LiveSnapshot:
+    """The companion's snapshot of the mission written to `miz`, running as
+    `boot` (session 1) at `at` (by default 37 min 42 s after its start).
+
+    Each group's and static's unit stands where the mission put it, or at
+    `moved[name]` (x, y, heading); a unit named in `in_air` flies. Launched
+    flights are added as plane groups under their live names, at their
+    departure, without the names counted dead.
+    """
+    start = game.conditions.start_time
+    if at is None:
+        at = start + timedelta(minutes=37, seconds=42)
+    groups, statics = miz_objects(miz)
+
+    def placed(unit: dict[str, Any]) -> dict[str, Any]:
+        unit = dict(unit, inAir=unit["name"] in in_air)
+        if unit["name"] in moved:
+            unit["x"], unit["y"], unit["hdg"] = moved[unit["name"]]
+        return unit
+
+    state_groups = [dict(g, units=[placed(u) for u in g["units"]]) for g in groups]
+    next_id = 1_000_000
+    for flight in launched:
+        position = flight.departure.position
+        units = []
+        for name in game.live.name_map.flight_units(flight):
+            if name in game.live.dead:
+                continue
+            next_id += 1
+            units.append(
+                placed(
+                    {
+                        "name": name,
+                        "id": next_id,
+                        "type": flight.unit_type.dcs_unit_type.id,
+                        "x": position.x,
+                        "y": position.y,
+                        "hdg": 0.0,
+                    }
+                )
+            )
+        next_id += 1
+        state_groups.append(
+            {
+                "name": flight.live_group_name,
+                "cat": 1 if flight.is_helo else 0,
+                "id": next_id,
+                "side": 2 if flight.squadron.coalition.player.is_blue else 1,
+                "units": units,
+            }
+        )
+    midnight = datetime(at.year, at.month, at.day)
+    data = json.dumps(
+        {
+            "minute": int((at - start).total_seconds() // 60),
+            "boot": boot,
+            "session": 1,
+            "modelTime": (at - start).total_seconds(),
+            "state": {
+                "meta": {
+                    "modelTime": (at - start).total_seconds(),
+                    "date": {"Year": at.year, "Month": at.month, "Day": at.day},
+                    "absTime": (at - midnight).total_seconds(),
+                },
+                "groups": state_groups,
+                "statics": [placed(s) for s in statics],
+                "airbases": [],
+            },
+        }
+    )
+    return taken(data)
+
+
+def tick_of(game: Game, miz: Path, **kwargs: Any) -> LiveSnapshot:
+    """`snapshot_of` decided and kept as the record's tick."""
+    snapshot = snapshot_of(game, miz, **kwargs)
+    game.live.decide(snapshot)
+    assert game.live.keep(snapshot)
+    return snapshot
+
+
+def aircraft_groups(mission: Mission) -> list[FlyingGroup[Any]]:
+    return [
+        group
+        for coalition in mission.coalition.values()
+        for country in coalition.countries.values()
+        for group in [*country.plane_group, *country.helicopter_group]
+    ]
+
+
+def markers(mission: Mission) -> list[str]:
+    return [
+        str(group.units[0].name)
+        for coalition in mission.coalition.values()
+        for country in coalition.countries.values()
+        for group in country.static_group
+        if str(group.units[0].name).startswith(MARKER_PREFIX)
+    ]
+
+
+def ato_flights(game: Game) -> list[Flight]:
+    return [f for c in (game.blue, game.red) for p in c.ato.packages for f in p.flights]
+
+
+def parked_per_squadron(game: Game, name_map: LiveUnitMap) -> Counter[Squadron]:
+    """The aircraft the map holds as parked (not of an ATO flight)."""
+    planned = {id(f) for f in ato_flights(game)}
+    return Counter(
+        u.flight.squadron
+        for u in name_map.aircraft.values()
+        if id(u.flight) not in planned
+    )
+
+
+def red_squadron(game: Game) -> Squadron:
+    """A red squadron at an airfield, with room for four flights of two."""
+    return next(
+        s
+        for s in game.red.air_wing.iter_squadrons()
+        if isinstance(s.location, Airfield) and s.untasked_aircraft >= 8
+    )
+
+
+def launch(game: Game, flight: Flight, name: str) -> None:
+    """The flight launched into the running mission as the group `name`."""
+    flight.launched = True
+    flight.live_group_name = name
+    game.live.name_map.add_launched(flight, [f"{name}-1", f"{name}-2"])
+
+
+def test_restore_starts_at_the_minute(
+    own: Game, start_miz: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    at = own.conditions.start_time.replace(minute=37, second=42, microsecond=500000)
+    tick_of(own, start_miz, at=at)
+    old_marker = own.live.marker
+    old_map = own.live.written_map
+    path = tmp_path / "retribution_dynamic.miz"
+
+    result = write_restore(own, path)
+
+    start = datetime(at.year, at.month, at.day, at.hour, 37)
+    assert (result.path, result.start, result.minute) == (path, start, 37)
+    assert own.conditions.start_time == start
+    mission = read_miz(path)
+    assert mission.start_time == start
+    assert own.live.marker != old_marker
+    assert markers(mission) == [MARKER_PREFIX + str(own.live.marker)]
+    written = own.live.written_map
+    assert written is not None and written is not old_map
+    assert set(written.aircraft) == {
+        str(u.name) for g in aircraft_groups(mission) if g.uncontrolled for u in g.units
+    }
+    assert (
+        f"Restore: {path} written, starting {start:%Y-%m-%d %H:%M}, from minute 37; "
+        "0 units placed, 0 where generated; "
+        "flights: 0 in the air, 0 to launch again, 0 finished"
+    ) in [r.getMessage() for r in caplog.records]
+
+
+def test_restore_writes_no_flights_and_parks_the_rest(
+    own: Game, start_miz: Path, tmp_path: Path
+) -> None:
+    squadron = red_squadron(own)
+    planned, airborne, ramp, landed = (plan_by_hand(own, 2, squadron) for _ in range(4))
+    launch(own, airborne, "LIVE 1")
+    launch(own, ramp, "LIVE 2")
+    launch(own, landed, "LIVE 3")
+    own.live.dead.add("LIVE 1-2")
+    own.live.landed.add("LIVE 3-1")
+    tick = tick_of(
+        own, start_miz, in_air={"LIVE 1-1"}, launched=[airborne, ramp, landed]
+    )
+    assert own.live.written_map is not None
+    before = parked_per_squadron(own, own.live.written_map)
+    base = [s for s in squadrons(own) if s.location is squadron.location]
+    assert all(before[s] == s.owned_aircraft for s in base), "the base parks all"
+    placement = RestorePlacement(own, tick, sort_launched(own, tick))
+    assert placement.parked(squadron) == squadron.owned_aircraft - 1
+    assert all(
+        placement.parked(s) == s.owned_aircraft
+        for s in squadrons(own)
+        if s is not squadron
+    )
+    landed_pilots = [p for p in landed.roster.iter_pilots() if p is not None]
+    path = tmp_path / "retribution_dynamic.miz"
+
+    result = write_restore(own, path)
+
+    assert (result.in_air, result.again, result.finished) == (1, 1, 1)
+    mission = read_miz(path)
+    written = own.live.written_map
+    assert written is not None
+    planned_ids = {id(f) for f in ato_flights(own)}
+    unmapped = set()
+    for group in aircraft_groups(mission):
+        names = [str(u.name) for u in group.units]
+        if not any(n in written.aircraft for n in names):
+            unmapped.add(str(group.name))
+            continue
+        assert group.uncontrolled, group.name
+        assert all(id(written.aircraft[n].flight) not in planned_ids for n in names)
+    started = {
+        str(g.name)
+        for g in aircraft_groups(read_miz(start_miz))
+        if not any(str(u.name) in own.live.name_map.aircraft for u in g.units)
+    }
+    assert unmapped == started, "no flight groups, only the front lines' JTACs"
+    after = parked_per_squadron(own, written)
+    for s in squadrons(own):
+        if s.location is squadron.location:
+            assert after[s] == placement.parked(s), s
+        else:
+            assert after[s] == before[s], s
+
+    assert not ramp.launched and ramp.live_group_name is None
+    assert not any(f is landed for f in landed.package.flights)
+    assert landed.package not in own.red.ato.packages
+    assert airborne.launched and airborne.live_group_name == "LIVE 1"
+    assert any(f is planned for f in ato_flights(own)) and not planned.launched
+    for s in squadrons(own):
+        held = sum(f.count for f in ato_flights(own) if f.squadron is s)
+        assert s.untasked_aircraft == s.owned_aircraft - held, s
+    assert all(any(p is q for q in squadron.available_pilots) for p in landed_pilots)
+
+
+def test_failed_restore_changes_nothing(
+    game: Game, own: Game, start_miz: Path, tmp_path: Path
+) -> None:
+    with pytest.raises(RestoreError):
+        write_restore(game, tmp_path / "no-tick.miz")
+    own.dynamic_campaign = False
+    with pytest.raises(RestoreError):
+        write_restore(own, tmp_path / "not-dynamic.miz")
+    own.dynamic_campaign = True
+
+    squadron = red_squadron(own)
+    ramp, landed = plan_by_hand(own, 2, squadron), plan_by_hand(own, 2, squadron)
+    launch(own, ramp, "LIVE 1")
+    launch(own, landed, "LIVE 2")
+    own.live.landed.add("LIVE 2-1")
+    tick_of(own, start_miz, launched=[ramp, landed])
+    record = own.live
+    marker, written_map = record.marker, record.written_map
+    verdicts = dict(record.verdicts)
+    packages = {c: list(c.ato.packages) for c in (own.blue, own.red)}
+    flights = ato_flights(own)
+    untasked = {s: s.untasked_aircraft for s in squadrons(own)}
+    start_time = own.conditions.start_time
+    planners = own.ground_planners
+    blocker = tmp_path / "file"
+    blocker.write_text("")
+
+    with pytest.raises(OSError):
+        write_restore(own, blocker / "retribution_dynamic.miz")
+
+    assert record.marker == marker and record.written_map is written_map
+    assert record.verdicts == verdicts
+    assert {c: list(c.ato.packages) for c in (own.blue, own.red)} == packages
+    assert ato_flights(own) == flights
+    assert ramp.launched and ramp.live_group_name == "LIVE 1"
+    assert landed.launched
+    assert {s: s.untasked_aircraft for s in squadrons(own)} == untasked
+    assert own.conditions.start_time == start_time
+    assert own.ground_planners is planners
+
+
+def test_replaced_mission_is_not_followed(
+    own: Game, start_miz: Path, tmp_path: Path
+) -> None:
+    record = own.live
+    record.receive(
+        EventBatch(
+            entries=(
+                LogEntry(10, "dead", "b1", 1, unit=LogRef("Tank-10")),
+                LogEntry(11, "dead", "b1", 1, unit=LogRef("Tank-11")),
+            ),
+            through=11,
+        )
+    )
+
+    result = write_restore(own, tmp_path / "retribution_dynamic.miz")
+
+    later = snapshot_of(
+        own, start_miz, at=own.conditions.start_time + timedelta(hours=1)
+    )
+    assert record.decide(later) is MissionVerdict.FOREIGN
+    assert not record.following_own_mission
+    assert not record.keep(later)
+    assert record.ready() == []
+    assert record.cursor == 11 and not record.has_held
+
+    restored = snapshot_of(own, result.path, boot="b2", at=result.start)
+    assert record.decide(restored) is MissionVerdict.OWN
+    assert record.current_verdict is MissionVerdict.OWN, "followed"
+    assert record.name_map is record.written_map
+    assert record.keep(restored)
+
+
+def test_restore_twice_writes_the_same_war(own: Game, tmp_path: Path) -> None:
+    tick = own.live.tick
+
+    def standing(path: Path) -> dict[str, tuple[float, float, float]]:
+        name_map = own.live.written_map
+        assert name_map is not None
+        groups, statics = miz_objects(path)
+        units = [u for g in groups for u in g["units"]] + list(statics)
+        return {
+            u["name"]: (u["x"], u["y"], u["hdg"])
+            for u in units
+            if u["name"] in name_map.theater_objects
+        }
+
+    first = write_restore(own, tmp_path / "first.miz")
+    first_war = standing(first.path)
+    first_marker = own.live.marker
+    assert own.live.tick is tick
+    second = write_restore(own, tmp_path / "second.miz")
+
+    assert first_war and standing(second.path) == first_war
+    assert own.live.marker != first_marker
+    assert markers(read_miz(first.path)) != markers(read_miz(second.path))
+
+
+def test_normal_campaign_generation_unchanged(
+    saved_games: Path, tmp_path: Path
+) -> None:
+    """Without a restore, a normal campaign's mission has a group per flight
+    and parks each squadron's untasked aircraft, base by base until one runs
+    out of parking (a regression guard: it passed before restores existed)."""
+    game = new_game(dynamic=False, squadrons_start_full=True)
+    game.pass_turn(no_action=True)
+    flights = ato_flights(game)
+    assert flights
+    untasked = {s: s.untasked_aircraft for s in squadrons(game)}
+    path = tmp_path / "normal.miz"
+    MissionSimulation(game).begin_simulation()  # as Begin Campaign's does
+
+    unit_map = MissionGenerator(game, game.conditions.start_time).generate_miz(path)
+
+    by_unit = {str(u.name): g for g in aircraft_groups(read_miz(path)) for u in g.units}
+    for flight in flights:
+        names = [n for n, u in unit_map.aircraft.items() if u.flight is flight]
+        assert len(names) == flight.count, flight
+        [group] = {id(by_unit[n]): by_unit[n] for n in names}.values()
+        assert len(group.units) == flight.count, flight
+    planned = {id(f) for f in flights}
+    parked = Counter(
+        u.flight.squadron
+        for u in unit_map.aircraft.values()
+        if id(u.flight) not in planned
+    )
+    for cp in game.theater.controlpoints:
+        short = not isinstance(cp, (Airfield, Fob))
+        for s in cp.squadrons:
+            if short:
+                assert parked[s] == 0, s
+                continue
+            assert parked[s] <= untasked[s], s
+            short = parked[s] < untasked[s]
+    assert sum(parked.values()) > 0

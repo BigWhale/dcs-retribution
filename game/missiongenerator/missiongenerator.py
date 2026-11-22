@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import dcs.lua
 from dcs import Mission, Point
@@ -53,14 +53,20 @@ from ..radio.datalink import DataLinkRegistry
 
 if TYPE_CHECKING:
     from game import Game
+    from game.companionlink.restore import RestorePlacement
 
 CARCASS_SUPPRESS_RADIUS_M = 5.0
 
 
 class MissionGenerator:
-    def __init__(self, game: Game, time: datetime) -> None:
+    def __init__(
+        self, game: Game, time: datetime, restore: Optional[RestorePlacement] = None
+    ) -> None:
         self.game = game
         self.time = time
+        #: A dynamic campaign's restored mission: no flights, the aircraft not
+        #: in the air parked (`game.companionlink.restore`).
+        self.restore = restore
         self.mission = Mission(game.theater.terrain)
         self.unit_map = UnitMap()
 
@@ -334,18 +340,20 @@ class MissionGenerator:
             ground_spawns_large=tgo_generator.ground_spawns_large,
             ground_spawns=tgo_generator.ground_spawns,
             country_assigner=self.country_assigner,
+            parked=self.restore.parked if self.restore is not None else None,
         )
 
         aircraft_generator.clear_parking_slots()
 
-        aircraft_generator.generate_flights(
-            self.game.blue.ato,
-            tgo_generator.runways,
-        )
-        aircraft_generator.generate_flights(
-            self.game.red.ato,
-            tgo_generator.runways,
-        )
+        if self.restore is None:
+            aircraft_generator.generate_flights(
+                self.game.blue.ato,
+                tgo_generator.runways,
+            )
+            aircraft_generator.generate_flights(
+                self.game.red.ato,
+                tgo_generator.runways,
+            )
         aircraft_generator.spawn_unused_aircraft()
 
         self.mission_data.flights = aircraft_generator.flights

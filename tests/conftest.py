@@ -108,7 +108,7 @@ def plan_by_hand(game: Game, count: int, squadron: Squadron | None = None) -> Fl
     package.add_flight(flight)
     flight.recreate_flight_plan()
     package.set_tot_asap(game.conditions.start_time)
-    game.blue.ato.add_package(package)
+    squadron.coalition.ato.add_package(package)
     return flight
 
 

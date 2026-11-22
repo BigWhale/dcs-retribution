@@ -196,6 +196,16 @@ class LiveRecord:
         )
         return True
 
+    def retire(self) -> None:
+        """The campaign's missions decided so far are no longer its own: a
+        restored mission replaces them. Each becomes another mission (its
+        uuid kept), so none is followed or launched into again and their
+        entries are dropped; the restored mission's first snapshot is decided
+        the campaign's own by its new marker."""
+        for pair, (verdict, uuid) in self.verdicts.items():
+            if verdict in _FOLLOWED:
+                self.verdicts[pair] = (MissionVerdict.FOREIGN, uuid)
+
     def _forget_old_verdicts(self) -> None:
         """Drops the oldest verdicts past `VERDICTS_KEPT`, never the current
         mission's."""

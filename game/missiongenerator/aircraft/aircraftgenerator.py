@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from functools import cached_property
-from typing import Any, Dict, List, TYPE_CHECKING, Tuple
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING, Tuple
 
 from dcs import Point
 from dcs.action import AITaskPush
@@ -66,6 +66,7 @@ class AircraftGenerator:
         ground_spawns_large: dict[ControlPoint, list[Tuple[StaticGroup, Point]]],
         ground_spawns: dict[ControlPoint, list[Tuple[StaticGroup, Point]]],
         country_assigner: CountryAssigner,
+        parked: Optional[Callable[[Squadron], int]] = None,
     ) -> None:
         self.mission = mission
         self.settings = settings
@@ -82,6 +83,8 @@ class AircraftGenerator:
         self.ground_spawns_large = ground_spawns_large
         self.ground_spawns = ground_spawns
         self.country_assigner = country_assigner
+        #: How many aircraft each squadron parks; its untasked ones when None.
+        self.parked = parked
 
         self.ewrj_package_dict: Dict[int, List[FlyingGroup[Any]]] = {}
         self.ewrj = settings.plugins.get("ewrj")
@@ -245,7 +248,10 @@ class AircraftGenerator:
         ):
             return
 
-        for _ in range(squadron.untasked_aircraft):
+        count = (
+            squadron.untasked_aircraft if self.parked is None else self.parked(squadron)
+        )
+        for _ in range(count):
             # Creating a flight even those this isn't a fragged mission lets us
             # reuse the existing debriefing code.
             # TODO: Special flight type?
