@@ -26,7 +26,8 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 
 from game import Game
 from game.companionlink.eventlog import EventBatch
-from game.companionlink.link import CompanionLink, LinkStatus
+from game.companionlink.link import CompanionLink
+from game.companionlink.linkstatus import LinkStatus
 from game.companionlink.liverecord import MissionVerdict, companion_status
 from game.companionlink.livestate import LiveStateContext
 from game.companionlink.snapshot import LiveSnapshot

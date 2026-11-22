@@ -4,7 +4,8 @@ Each snapshot carries the mission's absolute time and model time. The clock
 keeps the newest of them with the moment it arrived (`time.monotonic()`) and
 runs on with the wall clock between snapshots; the next snapshot corrects it.
 A new mission (DCS restarted, mission reloaded) moves it to that mission's
-time, backwards too. Held, it stands at its time until the next snapshot.
+time, backwards too. Held, it stands at its time until the next snapshot;
+held again, it stays where it was first held.
 
 Updated on the GUI thread, read from any: the anchor is one tuple, swapped
 whole.
@@ -38,9 +39,10 @@ class MissionClock:
 
     def hold(self, wall: Optional[float] = None) -> None:
         """Stands the clock at its time at `wall` (default now) until the next
-        `update`; nothing before a snapshot."""
+        `update`; nothing before a snapshot. A held clock stays at the moment
+        it was first held."""
         anchor = self._anchor
-        if anchor is None:
+        if anchor is None or anchor[3] is not None:
             return
         abs_time, model_time, received, _ = anchor
         self._anchor = (abs_time, model_time, received, _wall(wall))

@@ -16,8 +16,9 @@ import re
 import threading
 import time
 from collections.abc import Iterator
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import pytest
 
@@ -34,11 +35,17 @@ from game.game import Game  # noqa: E402
 from game.server import EventStream  # noqa: E402
 from game.sim import GameUpdateEvents  # noqa: E402
 from game.theater import Player  # noqa: E402
-from qt_ui import companionlinkcontroller, liberation_install, livelosses  # noqa: E402
+from qt_ui import (  # noqa: E402
+    companionlinkcontroller,
+    liberation_install,
+    livelosses,
+    uiconstants,
+)
 from qt_ui.companionlinkcontroller import CompanionLinkController  # noqa: E402
+from qt_ui.dialogs import Dialog  # noqa: E402
 from qt_ui.flightlauncher import FlightLauncher  # noqa: E402
 from qt_ui.livelosses import LiveLosses  # noqa: E402
-from qt_ui.models import GameModel  # noqa: E402
+from qt_ui.models import GameModel, PackageModel  # noqa: E402
 from qt_ui.simcontroller import SimController  # noqa: E402
 from tests.companionlink.test_commands import TOKEN as COMMAND_TOKEN  # noqa: E402
 from tests.companionlink.test_commands import FakeCommands  # noqa: E402
@@ -140,9 +147,19 @@ def window(
     LiveStateContext.set(None)
 
 
-def state(game: Game, minute: int, boot: str = "b1", own: bool = True) -> str:
-    """A snapshot of the mission `boot`; the campaign's own carries its marker."""
+def state(
+    game: Game,
+    minute: int,
+    boot: str = "b1",
+    own: bool = True,
+    start: Optional[datetime] = None,
+) -> str:
+    """A snapshot of the mission `boot` at its `minute`, the mission started at
+    `start` (default 1 June 2015, 08:00); the campaign's own carries its
+    marker."""
     statics = [{"name": MARKER_PREFIX + str(game.live.marker), "id": 9000}]
+    at = (start or datetime(2015, 6, 1, 8, 0)) + timedelta(minutes=minute)
+    midnight = datetime(at.year, at.month, at.day)
     return json.dumps(
         {
             "minute": minute,
@@ -151,8 +168,8 @@ def state(game: Game, minute: int, boot: str = "b1", own: bool = True) -> str:
             "modelTime": 60.0 * minute,
             "state": {
                 "meta": {
-                    "date": {"Year": 2015, "Month": 6, "Day": 1},
-                    "absTime": 28800.0 + 60 * minute,
+                    "date": {"Year": at.year, "Month": at.month, "Day": at.day},
+                    "absTime": (at - midnight).total_seconds(),
                 },
                 "groups": [],
                 "statics": statics if own else [],
@@ -412,3 +429,136 @@ def test_sent_flight_losses_applied_before_confirmed(
         assert squadron.owned_aircraft == owned - 1
     finally:
         launcher.stop()
+
+
+def test_spawn_confirmed_after_mission_turned_foreign(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[[FakeCompanion], Window],
+    game: Game,
+    commands: FakeCommands,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(
+        liberation_install, "companion_command_address", lambda: commands.address
+    )
+    monkeypatch.setattr(
+        liberation_install, "companion_command_token", lambda: COMMAND_TOKEN
+    )
+    commands.statuses = ["waiting"]  # accepted, not confirmed yet
+    flight = plan_by_hand(game, 2)
+    start = flight.flight_plan.startup_time()  # due from the first snapshot
+
+    foreign_gate, own_gate = threading.Event(), threading.Event()
+    fake = serve(
+        [
+            event("state", state(game, 1, start=start)),
+            foreign_gate,
+            event("state", state(game, 1, boot="b2", own=False, start=start)),
+            own_gate,
+            event("state", state(game, 2, start=start)),
+        ]
+    )
+    w = window(fake)
+    launcher = FlightLauncher(w.link)
+    launcher.confirm_warn_s = launcher.confirm_cap_s = 30.0
+    launcher.confirm_poll_s = 0.05
+    launcher.set_game(game)
+    try:
+        w.wait_for(lambda: following(game) and launcher.receiving)
+        launcher.launch_now(flight)
+        w.wait_for(lambda: len(commands.requests) == 1)
+
+        foreign_gate.set()
+        w.wait_for(lambda: "another mission" in w.link.status_text())
+        with commands.lock:
+            commands.statuses = ["spawned"]
+        w.wait_for(lambda: not launcher.is_busy(flight))
+
+        assert flight.launched is False
+        assert flight.live_group_name is None
+        assert (
+            f"Launch: {flight} spawned after the campaign's mission stopped being "
+            "followed; it launches again"
+        ) in [r.getMessage() for r in caplog.records]
+
+        with commands.lock:
+            commands.statuses = ["waiting"]
+        own_gate.set()
+        w.wait_for(lambda: len(commands.requests) == 2)
+        names = [u["name"] for u in commands.requests[1][0]["group"]["units"].values()]
+        assert game.live.name_map.flight_units(flight) == names
+        with commands.lock:
+            commands.statuses = ["spawned"]
+        w.wait_for(lambda: flight.launched)
+    finally:
+        launcher.stop()
+
+
+def test_edit_flight_dialog_defers_removal(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[[FakeCompanion], Window],
+    game: Game,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = threading.Event()
+    fake = serve([event("state", state(game, 1)), gate, event("events", "{}")])
+    w = window(fake)
+    w.wait_for(lambda: following(game) and game.live.cursor == 0)
+    monkeypatch.setattr(Dialog, "game_model", w.game_model)
+    monkeypatch.setattr(Dialog, "edit_flight_dialog", None)
+
+    uiconstants.load_event_icons()  # the dialog's window icon
+    # Opened before the launch: a launched flight's dialog does not open.
+    flight = plan_by_hand(game, 2)
+    package_model: PackageModel = w.game_model.ato_model.package_models.acquire(
+        flight.package
+    )
+    Dialog.open_edit_flight_dialog(package_model, flight)
+    dialog = Dialog.edit_flight_dialog
+    assert dialog is not None and dialog.isVisible()
+    flight.launched = True
+    flight.live_group_name = "LIVE 1"
+    game.live.name_map.add_launched(flight, ["LIVE 1-1", "LIVE 1-2"])
+
+    with fake.lock:
+        fake.entries.append(plane(1, "dead", "LIVE 1-1"))
+        fake.entries.append(plane(2, "dead", "LIVE 1-2"))
+    gate.set()
+    w.wait_for(lambda: game.live.cursor == 2)
+    assert flight in ato_flights(game)
+
+    dialog.reject()
+    w.pump()
+    assert flight not in ato_flights(game)
+    assert any(flight.id in e.deleted_flights for e in w.map_events)
+
+
+def test_drain_stops_when_nothing_held(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[[FakeCompanion], Window],
+    game: Game,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    turns: list[Callable[[], None]] = []
+
+    def single_shot(_ms: int, slot: Callable[[], None]) -> None:
+        turns.append(slot)
+
+    monkeypatch.setattr(livelosses.QTimer, "singleShot", single_shot)
+
+    gate = threading.Event()
+    fake = serve([event("state", state(game, 1)), gate, event("events", "{}")])
+    w = window(fake)
+    w.wait_for(lambda: following(game) and game.live.cursor == 0)
+
+    with fake.lock:
+        fake.entries.extend(filler(seq) for seq in range(1, 1201))
+    gate.set()
+    w.wait_for(lambda: game.live.cursor == 500)
+    assert len(turns) == 1
+    turns[0]()
+    assert game.live.cursor == 1000 and len(turns) == 2
+    turns[1]()
+    assert game.live.cursor == 1200 and len(turns) == 2

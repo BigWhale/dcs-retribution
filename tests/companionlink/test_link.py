@@ -21,7 +21,8 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from game.companionlink.eventlog import EventBatch, LogPos, LogRef, parse_events_page
-from game.companionlink.link import CompanionLink, LinkStatus
+from game.companionlink.link import CompanionLink
+from game.companionlink.linkstatus import LinkStatus
 from game.companionlink.snapshot import LiveSnapshot
 
 TOKEN = "tok-1"
@@ -48,6 +49,8 @@ class FakeCompanion:
         self.lock = threading.Lock()
         self.streams = 0
         self.refused = 0
+        #: How many hellos, from the first, leave out `lastSeq`.
+        self.hellos_without_last = 0
         self.server: Optional[ThreadingHTTPServer] = None
         self.thread: Optional[threading.Thread] = None
 
@@ -66,16 +69,18 @@ class FakeCompanion:
                     return
                 url = urlsplit(self.path)
                 if url.path == "/v1/hello":
-                    self.answer(
-                        200,
-                        {
-                            "protocol": 1,
-                            "boot": "b1",
-                            "session": 1,
-                            "modelTime": 5,
-                            "lastSeq": fake.last_seq(),
-                        },
-                    )
+                    hello: dict[str, Any] = {
+                        "protocol": 1,
+                        "boot": "b1",
+                        "session": 1,
+                        "modelTime": 5,
+                        "lastSeq": fake.last_seq(),
+                    }
+                    with fake.lock:
+                        if fake.hellos_without_last > 0:
+                            fake.hellos_without_last -= 1
+                            del hello["lastSeq"]
+                    self.answer(200, hello)
                 elif url.path == "/v1/events":
                     query = parse_qs(url.query)
                     after = int(query.get("after", ["0"])[0])
@@ -572,6 +577,40 @@ def test_events_new_cursor_starts_at_hello(serve: Any, connect: Any) -> None:
 
     assert fake.afters == [40]
     assert rec.seqs() == [41]
+
+
+def test_notice_without_cursor_waits_for_hello(
+    serve: Any, connect: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="game.companionlink")
+    notice, drop = threading.Event(), threading.Event()
+    fake = serve(
+        [
+            notice,
+            event("events", '{"lastSeq":7}'),
+            event("state", tank(1)),
+            drop,
+            CLOSE,
+        ],
+        [],
+    )
+    fake.hellos_without_last = 1
+    _, rec = connect(fake.address, retry=0.1, events_after=None, events=True)
+    wait_for(lambda: LinkStatus.LINKED in rec.statuses)
+    fake.add(*range(1, 8))
+    notice.set()
+    wait_for(lambda: len(rec.snapshots) == 1)  # after the notice's read
+
+    assert rec.batches == []
+    assert fake.afters == []
+    told = [r for r in caplog.records if "hello has no lastSeq" in r.getMessage()]
+    assert len(told) == 1
+
+    drop.set()
+    wait_for(lambda: len(rec.batches) == 1)
+    assert rec.batches[0].entries == ()
+    assert rec.batches[0].through == 7
+    assert fake.afters == []
 
 
 def test_cursor_above_log_said_once_per_connection(

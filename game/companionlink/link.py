@@ -33,12 +33,12 @@ from __future__ import annotations
 import logging
 import socket
 import threading
-from enum import Enum
 from typing import Any, Callable, Iterable, Iterator, Optional, TypeVar
 
 import httpx
 
 from game.companionlink.eventlog import EventBatch, parse_events_page
+from game.companionlink.linkstatus import LinkStatus as LinkStatus  # re-exported
 from game.companionlink.snapshot import LiveSnapshot, parse_snapshot
 
 log = logging.getLogger("game.companionlink")
@@ -54,13 +54,6 @@ CONNECT_TIMEOUT = 5.0
 EVENTS_PAGE = 5000
 
 T = TypeVar("T")
-
-
-class LinkStatus(Enum):
-    WAITING = "waiting"  # no connection
-    LINKED = "linked"  # connected, no snapshot yet
-    RECEIVING = "receiving"  # at least one snapshot on this connection
-    REFUSED = "refused"  # 401
 
 
 class _Failure(Exception):
@@ -242,10 +235,14 @@ class CompanionLink(threading.Thread):
         """Reads the event log from the cursor to its lastSeq; a failure
         raises, and the next connection reads again from the cursor. Only the
         read right after a hello compares the cursor with the hello's lastSeq,
-        once per connection: a notice's read finds the hello's lastSeq stale."""
+        once per connection, or starts a cursor from it: a notice's read finds
+        the hello's lastSeq stale, so without a cursor it waits for the next
+        hello."""
         if self._on_events is None:
             return
         if self._after is None:
+            if not after_hello:
+                return
             if self._hello_last is None:
                 self._once("no lastSeq", "the companion's hello has no lastSeq")
                 return

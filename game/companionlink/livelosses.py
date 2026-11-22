@@ -170,7 +170,7 @@ def apply_entries(game: Game, entries: Sequence[LogEntry]) -> LiveBatch:
     )
 
 
-def finish_flight(game: Game, flight: Flight) -> None:
+def finish_flight(flight: Flight) -> None:
     """Removes a finished or stranded flight from its package, and the package
     from its ATO when it is left empty."""
     package = flight.package

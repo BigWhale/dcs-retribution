@@ -11,7 +11,9 @@ the game's name map (`game.live.name_map`) by the names they are sent with,
 as the request goes out, so its losses are debriefed even before the spawn
 is confirmed; a launch tried again replaces them. Nothing is launched while
 the running mission is not the campaign's own
-(`game.live.following_own_mission`).
+(`game.live.following_own_mission`), and a spawn confirmed after the mission
+stopped being followed leaves its flight not launched: it launches again once
+the campaign's mission is followed.
 
 A spawn the companion has accepted but not yet confirmed keeps its flight
 busy (not due, not editable, no Launch) while the worker follows it, up to
@@ -81,7 +83,7 @@ from game.companionlink.flightspawn import (
     unit_names,
 )
 from game.companionlink.launching import due_flights
-from game.companionlink.link import LinkStatus
+from game.companionlink.linkstatus import LinkStatus
 from game.companionlink.livestate import LiveStateContext
 from game.companionlink.parking import ParkingClaims, ParkingPlan, plan_parking
 from game.companionlink.snapshot import LiveSnapshot
@@ -462,6 +464,17 @@ class FlightLauncher(QObject):
                 self._fail(flight, f"{flight} is not confirmed in flight: {error}")
             else:
                 self._fail(flight, f"{flight} was not launched: {error}")
+            return
+        game = self._game
+        if game is not None and not game.live.following_own_mission:
+            # Its names, mapped at send, are replaced by the next launch.
+            self._end_launch(flight)
+            self._sent_as.pop(flight, None)
+            log.warning(
+                "Launch: %s spawned after the campaign's mission stopped being "
+                "followed; it launches again",
+                flight,
+            )
             return
         self._end_launch(flight)
         flight.launched = True

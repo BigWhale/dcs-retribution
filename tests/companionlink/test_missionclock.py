@@ -84,3 +84,12 @@ def test_held_clock_stands_still() -> None:
     clock.update(snapshot(datetime(2005, 7, 1, 8, 20, 0), 1800), received=600.0)
     assert clock.now(610.0) == datetime(2005, 7, 1, 8, 20, 10)
     assert clock.model_time(610.0) == pytest.approx(1810)
+
+
+def test_held_twice_stands_at_first() -> None:
+    clock = MissionClock()
+    clock.update(snapshot(datetime(2005, 7, 1, 8, 0, 0), 600), received=100.0)
+    at_first = clock.now(130.0)
+    clock.hold(130.0)
+    clock.hold(200.0)
+    assert clock.now(500.0) == at_first

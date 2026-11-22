@@ -16,8 +16,11 @@ from __future__ import annotations
 import io
 import logging
 import math
+import os
 import pickle
 import pickletools
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,7 +38,7 @@ from game.ato.flighttype import FlightType
 from game.ato.package import Package
 from game.ato.starttype import StartType
 from game.companionlink.eventlog import EventBatch, LogEntry, LogPos, LogRef
-from game.companionlink.link import LinkStatus
+from game.companionlink.linkstatus import LinkStatus
 from game.companionlink.livelosses import apply_entries, finish_flight, settle
 from game.companionlink.liverecord import (
     MARKER_PREFIX,
@@ -420,6 +423,38 @@ def test_lost_mission_is_not_followed() -> None:
     )
 
 
+def test_verdicts_kept_bounded() -> None:
+    """The record keeps the newest missions' verdicts, the current one always."""
+    record = LiveRecord()
+    marker = MARKER_PREFIX + record.new_marker()
+    for session in range(70):
+        assert record.decide(snapshot("other", session)) is MissionVerdict.FOREIGN
+    current = snapshot("own", 1, marker)
+    assert record.decide(current) is MissionVerdict.OWN
+
+    assert len(record.verdicts) == 64
+    assert list(record.verdicts) == [("other", s) for s in range(7, 70)] + [("own", 1)]
+    assert record.following_own_mission
+
+
+def test_game_does_not_import_the_link() -> None:
+    """Loading a game needs neither the link nor httpx."""
+    env = dict(os.environ, PYTHONPATH=".")
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, game.game; print('game.companionlink.link' in sys.modules)",
+        ],
+        env=env,
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert done.stdout.strip() == "False"
+
+
 def test_record_survives_save_and_load(started: Started, tmp_path: Path) -> None:
     game = started.game
     record = game.live
@@ -568,7 +603,7 @@ def test_flight_finished_when_rest_landed(live: Live) -> None:
     assert batch.finished == [flight]
     assert squadron in batch.squadrons
     assert flight in package.flights, "returned, not removed"
-    finish_flight(game, flight)
+    finish_flight(flight)
     settle(game, batch)
     assert flight not in ato_flights(game, Player.BLUE)
     assert package not in game.blue.ato.packages
@@ -606,7 +641,7 @@ def test_finished_flight_landed_aircraft_holds_no_pilot(live: Live) -> None:
         ],
     )
     assert batch.finished == [flight]
-    finish_flight(game, flight)
+    finish_flight(flight)
     settle(game, batch)
     owned = squadron.owned_aircraft
 

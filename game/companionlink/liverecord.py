@@ -23,7 +23,7 @@ from enum import Enum
 from typing import Any, Optional
 
 from game.companionlink.eventlog import EventBatch, LogEntry
-from game.companionlink.link import LinkStatus
+from game.companionlink.linkstatus import LinkStatus
 from game.companionlink.liveunitmap import LiveUnitMap
 from game.companionlink.snapshot import LiveSnapshot
 
@@ -31,6 +31,9 @@ log = logging.getLogger("game.companionlink")
 
 #: The marker static's name, before the uuid of the mission written.
 MARKER_PREFIX = "dcs-companion-mission|"
+#: The most missions whose verdicts are kept: the newest, the current one
+#: always. An older mission's entries are far behind the cursor.
+VERDICTS_KEPT = 64
 
 
 class MissionVerdict(Enum):
@@ -54,7 +57,8 @@ class LiveRecord:
         self.name_map = LiveUnitMap()
         #: The uuid `name_map` belongs to.
         self.map_marker: Optional[str] = None
-        #: Every mission decided: (boot, session) -> (verdict, its uuid).
+        #: The missions decided, oldest first, at most `VERDICTS_KEPT`:
+        #: (boot, session) -> (verdict, its uuid).
         self.verdicts: dict[tuple[str, int], tuple[MissionVerdict, Optional[str]]] = {}
         #: The mission the newest snapshot came from; None while the link is
         #: lost or stale.
@@ -139,7 +143,18 @@ class LiveRecord:
                 *pair,
             )
         self.verdicts[pair] = (verdict, uuid)
+        self._forget_old_verdicts()
         return verdict
+
+    def _forget_old_verdicts(self) -> None:
+        """Drops the oldest verdicts past `VERDICTS_KEPT`, never the current
+        mission's."""
+        excess = len(self.verdicts) - VERDICTS_KEPT
+        if excess <= 0:
+            return
+        old = [p for p in self.verdicts if p != self.current][:excess]
+        for pair in old:
+            del self.verdicts[pair]
 
     def lose(self) -> None:
         """The link is lost or stale: no mission is current. Verdicts stay."""
@@ -157,6 +172,12 @@ class LiveRecord:
     def following_own_mission(self) -> bool:
         """The current mission is the campaign's own."""
         return self.current_verdict in _FOLLOWED
+
+    @property
+    def has_held(self) -> bool:
+        """Entries are held: waiting for their mission's verdict or for
+        `ready`."""
+        return bool(self._pending)
 
     def receive(self, batch: EventBatch) -> None:
         """Holds a batch's entries until their mission is decided.

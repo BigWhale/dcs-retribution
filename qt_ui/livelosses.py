@@ -12,9 +12,10 @@ not start the cursor afresh past the mission's entries.
 
 A finished flight (every unit dead or landed) and a stranded one (not
 launched, its departure captured) leave the ATO through its Qt models, so
-the lists follow. A flight whose package is open in the package dialog is
-removed when that dialog closes; until then it stays where it is. The map
-gets the batch's events once per batch.
+the lists follow. A flight whose package is open in the package dialog, or
+which is open in the edit-flight dialog, is removed when that dialog closes;
+until then it stays where it is. The map gets the batch's events once per
+batch.
 """
 
 from __future__ import annotations
@@ -51,8 +52,8 @@ class LiveLosses(QObject):
         super().__init__(parent)
         self._game_model: Optional[GameModel] = None
         self._game: Optional[Game] = None
-        # Flights waiting for their package dialog to close, by dialog: the
-        # flight, and whether it was stranded (not finished).
+        # Flights waiting for their package or edit-flight dialog to close, by
+        # dialog: the flight, and whether it was stranded (not finished).
         self._deferred: dict[QDialog, list[tuple[Flight, bool]]] = {}
         link.events_received.connect(self._on_events)
         link.verdict_changed.connect(self._on_verdict)
@@ -89,7 +90,7 @@ class LiveLosses(QObject):
     @Slot()
     def _drain(self) -> None:
         """Applies the next chunk of ready entries; another follows on the next
-        turn of the event loop until none is ready."""
+        turn of the event loop while entries are still held."""
         game = self._dynamic_game()
         if game is None:
             return
@@ -119,7 +120,8 @@ class LiveLosses(QObject):
             game.live.applied(last)
             # Whatever is left (a full chunk, or entries behind one to drop)
             # waits for the next turn of the event loop.
-            QTimer.singleShot(0, self._drain)
+            if game.live.has_held:
+                QTimer.singleShot(0, self._drain)
         if failed or batch is None:
             return
         ms = (time.perf_counter() - started) * 1000
@@ -146,13 +148,10 @@ class LiveLosses(QObject):
 
     def _remove(self, flight: Flight, stranded: bool, events: GameUpdateEvents) -> None:
         """Removes the flight through the ATO's models, or when the package
-        dialog showing its package closes."""
-        dialog = Dialog.edit_package_dialog
-        if (
-            dialog is not None
-            and dialog.isVisible()
-            and dialog.package_model.package is flight.package
-        ):
+        dialog showing its package, or the edit-flight dialog showing it,
+        closes."""
+        dialog = _dialog_showing(flight)
+        if dialog is not None:
             if dialog not in self._deferred:
                 self._deferred[dialog] = []
                 # (PySide6 6.4's stub lacks the signal.)
@@ -166,8 +165,8 @@ class LiveLosses(QObject):
         self._delete(flight, events)
 
     def _remove_deferred(self, dialog: QDialog) -> None:
-        """The package dialog closed: its flights waiting leave the ATO; a
-        stranded one launched meanwhile flies on."""
+        """The dialog closed: its flights waiting leave the ATO; a stranded
+        one launched meanwhile flies on."""
         deferred = self._deferred.pop(dialog, [])
         game = self._dynamic_game()
         if game is None:
@@ -209,3 +208,23 @@ class LiveLosses(QObject):
         events.delete_flight(flight)
         if not package.flights and package in ato_model.ato.packages:
             ato_model.cancel_or_abort_package(package)
+
+
+def _dialog_showing(flight: Flight) -> Optional[QDialog]:
+    """The open dialog that shows the flight: the package dialog of its
+    package, or its edit-flight dialog; None when neither is open."""
+    package_dialog = Dialog.edit_package_dialog
+    if (
+        package_dialog is not None
+        and package_dialog.isVisible()
+        and package_dialog.package_model.package is flight.package
+    ):
+        return package_dialog
+    flight_dialog = Dialog.edit_flight_dialog
+    if (
+        flight_dialog is not None
+        and flight_dialog.isVisible()
+        and flight_dialog.flight is flight
+    ):
+        return flight_dialog
+    return None

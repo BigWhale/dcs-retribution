@@ -253,7 +253,7 @@ class QTopPanel(QFrame):
                         self,
                         "Live losses will not apply",
                         (
-                            f"The dynamic campaign has begun and its starting "
+                            "The dynamic campaign has begun and its starting "
                             f"mission ({path.name}) was written, but the mission's "
                             "name map is missing, so live losses will not apply to "
                             "the campaign.<br /><br />Start a new dynamic campaign."
