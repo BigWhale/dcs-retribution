@@ -38,6 +38,10 @@ from qt_ui.windows.QRadioFrequencyDialog import QRadioFrequencyDialog
 from qt_ui.windows.mission.QAutoCreateDialog import QAutoCreateDialog
 from qt_ui.windows.mission.flight.QFlightCreator import QFlightCreator
 
+#: How often a dynamic campaign's dialog with ASAP ticked shows the times as of
+#: now again (the fields show minutes).
+ASAP_REFRESH_MS = 5_000
+
 
 class QPackageDialog(QDialog):
     """Base package management dialog.
@@ -143,6 +147,10 @@ class QPackageDialog(QDialog):
         self.tot_column.addWidget(self.tot_help_label)
 
         if self.dynamic:
+            # With ASAP the fields show the times as of now from the start: a
+            # new package's TOT is a placeholder until it is worked out.
+            if self.package_model.package.auto_asap:
+                self.package_model.update_tot()
             self.update_times()
 
         self.package_view = QFlightList(self.game_model, self.package_model)
@@ -184,6 +192,16 @@ class QPackageDialog(QDialog):
         self.accepted.connect(self.on_save)
         self.finished.connect(self.on_close)
         self.rejected.connect(self.on_cancel)
+
+        if self.dynamic:
+            # The mission clock runs on: a ticked ASAP keeps showing the
+            # times as of now while the dialog is open.
+            self.asap_timer = QTimer(self)
+            self.asap_timer.setInterval(ASAP_REFRESH_MS)
+            # (PySide6 6.4's stub lacks the signals.)
+            self.asap_timer.timeout.connect(self.refresh_asap)  # type: ignore[attr-defined]
+            self.finished.connect(self.asap_timer.stop)  # type: ignore[attr-defined]
+            self.asap_timer.start()
 
         # A dynamic campaign's flight in flight or on its way there can be
         # neither deleted nor edited here, nor its package deleted.
@@ -296,6 +314,12 @@ class QPackageDialog(QDialog):
         else:
             show_time(self.start_edit, start, now)
             self.start_edit.setEnabled(editable)
+
+    def refresh_asap(self) -> None:
+        """A ticked ASAP's times, worked out again from the clock's now."""
+        package = self.package_model.package
+        if package.auto_asap and package.all_flights_waiting_for_start():
+            self.package_model.update_tot()
 
     def on_launch_changed(self, flight: Flight, *_args: object) -> None:
         """A launch of this package's flight began or ended: its times locked
