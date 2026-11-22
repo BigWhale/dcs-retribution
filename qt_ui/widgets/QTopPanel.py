@@ -17,6 +17,7 @@ from game import Game, persistency
 from game.ato.flightstate import Uninitialized
 from game.ato.package import Package
 from game.ato.traveltime import TotEstimator
+from game.companionlink.liveunitmap import LiveUnitMap
 from game.profiling import logged_duration
 from game.settings.settings import FastForwardStopCondition
 from game.utils import meters
@@ -78,6 +79,7 @@ class QTopPanel(QFrame):
         self.companion_status.setVisible(False)
         companion_link.status_changed.connect(self.update_companion_status)
         companion_link.snapshot_received.connect(self.update_companion_status)
+        companion_link.verdict_changed.connect(self.update_companion_status)
 
         self.factionsInfos = QFactionsInfos(self.game)
 
@@ -215,6 +217,8 @@ class QTopPanel(QFrame):
             # Recreates the sim for the new turn, so it comes before generation.
             GameUpdateSignal.get_instance().updateGame(game)
             path = persistency.mission_path_for("retribution_dynamic.miz")
+            # The mission carries a new marker; the link follows only it.
+            game.live.new_marker()
             try:
                 self.sim_controller.generate_miz(path)
             except Exception as ex:
@@ -235,6 +239,13 @@ class QTopPanel(QFrame):
                 )
             else:
                 logging.info("Dynamic campaign begun, mission written to %s", path)
+                # Its losses are debriefed against the names it was written
+                # with, kept with the save.
+                game_loop = self.sim_controller.game_loop
+                assert game_loop is not None and game_loop.sim.unit_map is not None
+                unit_map = game_loop.sim.unit_map
+                game.live.written(LiveUnitMap.from_generation(unit_map, game))
+                persistency.autosave(game)
         self.passTurnButton.setVisible(False)
         self.companion_link.start(game)
 

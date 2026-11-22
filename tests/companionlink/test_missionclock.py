@@ -71,3 +71,16 @@ def test_reset() -> None:
     clock.reset()
     assert clock.now() is None
     assert clock.mission_start() is None
+
+
+def test_held_clock_stands_still() -> None:
+    clock = MissionClock()
+    clock.update(snapshot(datetime(2005, 7, 1, 8, 0, 0), 600), received=100.0)
+    at_hold = clock.now(130.0)
+    model_at_hold = clock.model_time(130.0)
+    clock.hold(130.0)
+    assert clock.now(500.0) == at_hold
+    assert clock.model_time(500.0) == pytest.approx(model_at_hold)
+    clock.update(snapshot(datetime(2005, 7, 1, 8, 20, 0), 1800), received=600.0)
+    assert clock.now(610.0) == datetime(2005, 7, 1, 8, 20, 10)
+    assert clock.model_time(610.0) == pytest.approx(1810)
