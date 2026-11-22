@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import pickle
 import zlib
 from collections import Counter
@@ -34,7 +35,8 @@ from dcs.unitgroup import FlyingGroup
 
 from game import persistency
 from game.ato.flight import Flight
-from game.companionlink.eventlog import EventBatch, LogEntry, LogRef
+from game.companionlink.eventlog import EventBatch, LogEntry, LogPos, LogRef
+from game.companionlink.livelosses import apply_entries
 from game.companionlink.liverecord import MARKER_PREFIX, MissionVerdict
 from game.companionlink.liveunitmap import LiveUnitMap
 from game.companionlink.restore import (
@@ -44,12 +46,15 @@ from game.companionlink.restore import (
     write_restore,
 )
 from game.companionlink.snapshot import LiveSnapshot, parse_snapshot
+from game.data.units import UnitClass
 from game.game import Game
 from game.migrator import Migrator
 from game.missiongenerator import MissionGenerator
 from game.sim.missionsimulation import MissionSimulation
 from game.squadrons import Squadron
-from game.theater import Airfield, Fob
+from game.theater import Airfield, ControlPoint, Fob
+from game.theater.theatergroundobject import ShipGroundObject
+from game.transfers import TransferOrder
 from tests.conftest import generate_starting_mission, new_game, plan_by_hand, squadrons
 
 CAMPAIGN = Path("resources/campaigns/golan_heights_lite.yaml")
@@ -351,6 +356,8 @@ def snapshot_of(
     boot: str = "b1",
     moved: Mapping[str, tuple[float, float, float]] = {},
     in_air: frozenset[str] | set[str] = frozenset(),
+    gone: frozenset[str] | set[str] = frozenset(),
+    extra: Sequence[dict[str, Any]] = (),
     launched: Sequence[Flight] = (),
     at: Optional[datetime] = None,
 ) -> LiveSnapshot:
@@ -358,7 +365,8 @@ def snapshot_of(
     `boot` (session 1) at `at` (by default 37 min 42 s after its start).
 
     Each group's and static's unit stands where the mission put it, or at
-    `moved[name]` (x, y, heading); a unit named in `in_air` flies. Launched
+    `moved[name]` (x, y, heading); a unit named in `in_air` flies, one named
+    in `gone` is missing. The `extra` groups are added as given. Launched
     flights are added as plane groups under their live names, at their
     departure, without the names counted dead.
     """
@@ -373,7 +381,11 @@ def snapshot_of(
             unit["x"], unit["y"], unit["hdg"] = moved[unit["name"]]
         return unit
 
-    state_groups = [dict(g, units=[placed(u) for u in g["units"]]) for g in groups]
+    state_groups = [
+        dict(g, units=[placed(u) for u in g["units"] if u["name"] not in gone])
+        for g in groups
+    ]
+    state_groups.extend(extra)
     next_id = 1_000_000
     for flight in launched:
         position = flight.departure.position
@@ -418,7 +430,7 @@ def snapshot_of(
                     "absTime": (at - midnight).total_seconds(),
                 },
                 "groups": state_groups,
-                "statics": [placed(s) for s in statics],
+                "statics": [placed(s) for s in statics if s["name"] not in gone],
                 "airbases": [],
             },
         }
@@ -507,9 +519,10 @@ def test_restore_starts_at_the_minute(
     assert set(written.aircraft) == {
         str(u.name) for g in aircraft_groups(mission) if g.uncontrolled for u in g.units
     }
+    assert result.placed > 0 and result.unplaced == 0, "the tick has every unit"
     assert (
         f"Restore: {path} written, starting {start:%Y-%m-%d %H:%M}, from minute 37; "
-        "0 units placed, 0 where generated; "
+        f"{result.placed} units placed, 0 where generated; "
         "flights: 0 in the air, 0 to launch again, 0 finished"
     ) in [r.getMessage() for r in caplog.records]
 
@@ -676,6 +689,324 @@ def test_restore_twice_writes_the_same_war(own: Game, tmp_path: Path) -> None:
     assert first_war and standing(second.path) == first_war
     assert own.live.marker != first_marker
     assert markers(read_miz(first.path)) != markers(read_miz(second.path))
+
+
+# Ground placement: the restored mission's ground units, ships and convoys
+# stand where the tick saw them.
+
+#: A campaign at sea: frigates, shipping lanes between friendly bases, roads.
+SEA = Path("resources/campaigns/battle_of_abu_dhabi.yaml")
+
+
+@pytest.fixture(scope="module")
+def sea_miz(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Where the sea campaign's Begin Campaign mission is written."""
+    return tmp_path_factory.mktemp("sea") / "start.miz"
+
+
+@pytest.fixture(scope="module")
+def sea(saved_games: Path, sea_miz: Path) -> Game:
+    """Begin Campaign's game of the sea campaign, its mission running: a blue
+    frigate group sailing to a destination, a red convoy on the road and a
+    blue cargo ship in its lane."""
+    game = new_game(dynamic=True, squadrons_start_full=True, campaign_file=SEA)
+    game.pass_turn(no_action=True)
+    bandar, kish = base(game, "Bandar Abbas Intl"), base(game, "Kish Intl")
+    frigates(game).target_position = bandar.shipping_lanes[kish][3]
+    dhafra, maktoum = base(game, "Al Dhafra AFB"), base(game, "FOB Al Maktoum")
+    red_types = list(dhafra.base.armor)
+    game.red.transfers.new_transfer(
+        TransferOrder(dhafra, maktoum, {red_types[0]: 2, red_types[-1]: 2}),
+        game.conditions.start_time,
+    )
+    bandar.base.commission_units({red_types[0]: 4})
+    game.blue.transfers.new_transfer(
+        TransferOrder(bandar, kish, {red_types[0]: 4}), game.conditions.start_time
+    )
+    game.live.new_marker()
+    sim = generate_starting_mission(game, sea_miz.parent)
+    assert sim.unit_map is not None
+    game.live.written(LiveUnitMap.from_generation(sim.unit_map, game))
+    tick_of(game, sea_miz)
+    return game
+
+
+def base(game: Game, name: str) -> ControlPoint:
+    return next(cp for cp in game.theater.controlpoints if cp.name == name)
+
+
+def frigates(game: Game) -> ShipGroundObject:
+    return next(
+        tgo
+        for tgo in base(game, "Bandar Abbas Intl").ground_objects
+        if isinstance(tgo, ShipGroundObject)
+    )
+
+
+def restored_units(mission: Mission) -> dict[str, tuple[Any, Any]]:
+    """Every unit of the mission's groups by name, with its group."""
+    units: dict[str, tuple[Any, Any]] = {}
+    for coalition in mission.coalition.values():
+        for country in coalition.countries.values():
+            groups: list[Any] = [
+                *country.vehicle_group,
+                *country.ship_group,
+                *country.static_group,
+            ]
+            for group in groups:
+                for unit in group.units:
+                    units[str(unit.name)] = (unit, group)
+    return units
+
+
+def miz_units(miz: Path) -> dict[str, dict[str, Any]]:
+    """The units of a written mission's groups by name, as a snapshot has
+    them."""
+    groups, statics = miz_objects(miz)
+    return {u["name"]: u for g in groups for u in g["units"]} | {
+        s["name"]: s for s in statics
+    }
+
+
+def at(point: Any) -> tuple[float, float]:
+    return (point.x, point.y)
+
+
+def near(a: tuple[float, float], b: tuple[float, float], within: float = 0.01) -> bool:
+    return math.dist(a, b) <= within
+
+
+def test_ground_units_stand_where_the_tick_saw_them(
+    sea: Game, sea_miz: Path, tmp_path: Path
+) -> None:
+    own = copy(sea)
+    name_map = own.live.name_map
+    groups, _ = miz_objects(sea_miz)
+    tgo_group = next(
+        g
+        for g in groups
+        if g["cat"] == 2
+        and len(g["units"]) > 1
+        and all(u["name"] in name_map.theater_objects for u in g["units"])
+    )
+    first = tgo_group["units"][0]
+    moved = {first["name"]: (first["x"] + 100.0, first["y"], 90.0)}
+    ships = frigates(own)
+    ship_names = [u.unit_name for g in ships.groups for u in g.units]
+    start = miz_units(sea_miz)
+    for name in ship_names:
+        moved[name] = (start[name]["x"] + 1000.0, start[name]["y"] + 500.0, 45.0)
+    tick_of(own, sea_miz, moved=moved)
+
+    result = write_restore(own, tmp_path / "retribution_dynamic.miz")
+
+    units = restored_units(read_miz(result.path))
+    unit, group = units[first["name"]]
+    assert near(at(unit.position), moved[first["name"]][:2])
+    assert unit.heading == pytest.approx(90.0)
+    assert len(group.points) == 1
+    assert near(at(group.points[0].position), at(unit.position))
+    for name in ship_names[1:]:
+        assert near(at(units[name][0].position), moved[name][:2])
+    lead, ship_group = units[ship_names[0]]
+    assert near(at(lead.position), moved[ship_names[0]][:2])
+    assert near(at(ship_group.points[0].position), at(lead.position))
+    assert ships.target_position is not None
+    assert len(ship_group.points) == 2, "the route after point 0 kept"
+    assert near(at(ship_group.points[1].position), at(ships.target_position))
+    assert result.unplaced == 0
+
+
+#: Front-line unit classes whose every stance's orders start with a reform
+#: point 50 m ahead of the group (artillery's depend on a target in range).
+MANOEUVRING = {UnitClass.TANK, UnitClass.IFV, UnitClass.APC, UnitClass.ATGM}
+
+
+def test_front_line_from_the_tick(own: Game, start_miz: Path, tmp_path: Path) -> None:
+    name_map = own.live.name_map
+    enemy = {
+        cp.id: other
+        for front in own.theater.conflicts()
+        for cp, other in ((front.blue_cp, front.red_cp), (front.red_cp, front.blue_cp))
+    }
+    groups, _ = miz_objects(start_miz)
+    moved: dict[str, tuple[float, float, float]] = {}
+    #: The tick's positions per key: (x, y) and the old group's name.
+    seen: dict[tuple[str, Any], list[tuple[tuple[float, float], str]]] = {}
+    old_size: Counter[str] = Counter()
+    for g in groups:
+        for u in g["units"]:
+            unit = name_map.front_line_units.get(u["name"])
+            if unit is None:
+                continue
+            to = enemy[unit.origin.id].position
+            d = math.dist((u["x"], u["y"]), at(to))
+            x = u["x"] + 300.0 * (to.x - u["x"]) / d
+            y = u["y"] + 300.0 * (to.y - u["y"]) / d
+            moved[u["name"]] = (x, y, u["hdg"])
+            key = (unit.unit_type.variant_id, unit.origin.id)
+            seen.setdefault(key, []).append(((x, y), g["name"]))
+            old_size[g["name"]] += 1
+    assert moved, "the campaign has a front line"
+    tick_of(own, start_miz, moved=moved)
+
+    result = write_restore(own, tmp_path / "retribution_dynamic.miz")
+
+    written = own.live.written_map
+    assert written is not None
+    mission = read_miz(result.path)
+    placed_from: Counter[str] = Counter()
+    new_groups = ordered = 0
+    for coalition in mission.coalition.values():
+        for country in coalition.countries.values():
+            for group in country.vehicle_group:
+                front = [written.front_line_units.get(str(u.name)) for u in group.units]
+                if front[0] is None:
+                    continue
+                new_groups += 1
+                previous: Optional[str] = None
+                for vehicle, mapped in zip(group.units, front):
+                    assert mapped is not None
+                    key = (mapped.unit_type.variant_id, mapped.origin.id)
+                    old = next(
+                        (o for xy, o in seen[key] if near(xy, at(vehicle.position))),
+                        None,
+                    )
+                    assert old is not None, f"{vehicle.name} not on a tick position"
+                    if previous is not None and old != previous:
+                        assert (
+                            placed_from[previous] == old_size[previous]
+                        ), "an old group split while the new one had room"
+                    placed_from[old] += 1
+                    previous = old
+                first = group.units[0].position
+                assert near(at(group.points[0].position), at(first))
+                if front[0].unit_type.unit_class not in MANOEUVRING:
+                    continue
+                ordered += 1
+                assert len(group.points) >= 2, "the stance's orders"
+                assert math.dist(
+                    at(group.points[0].position), at(group.points[1].position)
+                ) == pytest.approx(50.0, abs=1.0), "the reform point ahead of it"
+    assert new_groups and ordered
+    assert sum(placed_from.values()) == len(moved)
+
+
+def test_convoy_rejoins_its_route(sea: Game, sea_miz: Path, tmp_path: Path) -> None:
+    own = copy(sea)
+    [convoy] = list(own.red.transfers.convoys)
+    route = list(convoy.origin.convoy_route_to(convoy.destination))
+    assert len(route) > 3
+    names = [n for n, u in own.live.name_map.convoys.items() if u.convoy is convoy]
+    third = route[2]
+    moved = {
+        name: (third.x + 30.0 - 15.0 * i, third.y + 30.0, 10.0 * i)
+        for i, name in enumerate(names)
+    }
+    tick_of(own, sea_miz, moved=moved)
+    by_type: dict[str, list[tuple[float, float]]] = {}
+    for name in names:
+        by_type.setdefault(
+            own.live.name_map.convoys[name].unit_type.variant_id, []
+        ).append(moved[name][:2])
+
+    result = write_restore(own, tmp_path / "retribution_dynamic.miz")
+
+    written = own.live.written_map
+    assert written is not None
+    units = restored_units(read_miz(result.path))
+    new_names = [n for n, u in written.convoys.items() if u.convoy is convoy]
+    assert len(new_names) == len(names)
+    lead, group = units[new_names[0]]
+    assert near(at(lead.position), moved[names[0]][:2])
+    for name in new_names:
+        kind = written.convoys[name].unit_type.variant_id
+        assert any(near(at(units[name][0].position), xy) for xy in by_type[kind])
+    assert near(at(group.points[0].position), at(lead.position))
+    later = [at(p.position) for p in group.points[1:]]
+    assert len(later) == len(route) - 2, "the points before the nearest dropped"
+    assert all(near(a, at(b)) for a, b in zip(later, route[2:]))
+    assert near(later[-1], at(convoy.route_end))
+
+
+def test_cargo_ship_rejoins_its_lane(sea: Game, sea_miz: Path, tmp_path: Path) -> None:
+    own = copy(sea)
+    [ship] = list(own.blue.transfers.cargo_ships)
+    lane = list(ship.route)
+    [name] = [n for n, s in own.live.name_map.cargo_ships.items() if s is ship]
+    fourth = lane[3]
+    tick_of(own, sea_miz, moved={name: (fourth.x + 50.0, fourth.y - 50.0, 200.0)})
+
+    result = write_restore(own, tmp_path / "retribution_dynamic.miz")
+
+    written = own.live.written_map
+    assert written is not None
+    [new_name] = [n for n, s in written.cargo_ships.items() if s is ship]
+    unit, group = restored_units(read_miz(result.path))[new_name]
+    assert near(at(unit.position), (fourth.x + 50.0, fourth.y - 50.0))
+    assert near(at(group.points[0].position), at(unit.position))
+    later = [at(p.position) for p in group.points[1:]]
+    assert len(later) == len(lane) - 3, "the points before the nearest dropped"
+    assert all(near(a, at(b)) for a, b in zip(later, lane[3:]))
+    assert near(later[-1], at(lane[-1]))
+
+
+def test_tick_and_game_disagree(own: Game, start_miz: Path, tmp_path: Path) -> None:
+    """Review Focus 2: the tick never brings the dead back nor loses the
+    living; a name it has that the map does not know is ignored."""
+    name_map = own.live.name_map
+    groups, _ = miz_objects(start_miz)
+    tgo_groups = [
+        g
+        for g in groups
+        if g["cat"] == 2
+        and len(g["units"]) > 2
+        and all(u["name"] in name_map.theater_objects for u in g["units"])
+    ]
+    gone = tgo_groups[0]["units"][1]["name"]
+    killed = tgo_groups[1]["units"][1]
+    gone_unit = name_map.theater_objects[gone].theater_unit
+    apply_entries(
+        own,
+        [
+            LogEntry(
+                1,
+                "dead",
+                "b1",
+                1,
+                unit=LogRef(killed["name"], killed["type"], 1, "ground"),
+                pos=LogPos(killed["x"], killed["y"], 0.0),
+            )
+        ],
+    )
+    assert not name_map.theater_objects[killed["name"]].theater_unit.alive
+    tick_of(
+        own,
+        start_miz,
+        gone={gone},
+        extra=[tank("Stranger", 1000.0, -2000.0)],
+        moved={killed["name"]: (killed["x"] + 40.0, killed["y"], 0.0)},
+    )
+
+    result = write_restore(own, tmp_path / "retribution_dynamic.miz")
+
+    mission = read_miz(result.path)
+    units = restored_units(mission)
+    assert near(at(units[gone][0].position), at(gone_unit.position))
+    assert result.unplaced >= 1
+    assert killed["name"] not in units
+    wrecks = [
+        g.units[0]
+        for coalition in mission.coalition.values()
+        for country in coalition.countries.values()
+        for g in country.static_group
+        if g.dead
+    ]
+    assert any(
+        w.type == killed["type"] and near(at(w.position), (killed["x"], killed["y"]))
+        for w in wrecks
+    ), "its wreck where it died"
+    assert "Stranger-1" not in units
 
 
 def test_normal_campaign_generation_unchanged(

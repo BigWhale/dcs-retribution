@@ -51,6 +51,7 @@ from ..ato import FlightType
 
 if TYPE_CHECKING:
     from game import Game
+    from game.companionlink.restore import RestorePlacement
 
 SPREAD_DISTANCE_FACTOR = 0.1, 0.3
 SPREAD_DISTANCE_SIZE_FACTOR = 0.1
@@ -83,6 +84,7 @@ class FlotGenerator:
         unit_map: UnitMap,
         radio_registry: RadioRegistry,
         mission_data: MissionData,
+        restore: Optional[RestorePlacement] = None,
     ) -> None:
         self.mission = mission
         self.conflict = conflict
@@ -94,6 +96,9 @@ class FlotGenerator:
         self.unit_map = unit_map
         self.radio_registry = radio_registry
         self.mission_data = mission_data
+        #: A dynamic campaign's restored mission: each group placed where the
+        #: tick saw its units, before its infantry and its orders.
+        self.restore = restore
 
     def generate(self) -> None:
         position = FrontLineConflictDescription.frontline_position(
@@ -799,6 +804,12 @@ class FlotGenerator:
                 final_position,
                 heading=spawn_heading.opposite,
             )
+            if self.restore is not None:
+                self.restore.place_front_line(
+                    g,
+                    self.conflict.front_line.control_point_friendly_to(is_player),
+                    group.unit_type,
+                )
             if is_player == Player.BLUE:
                 g.set_skill(Skill(self.game.settings.player_skill))
             else:

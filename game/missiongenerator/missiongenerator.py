@@ -124,6 +124,9 @@ class MissionGenerator:
 
         ConvoyGenerator(self.mission, self.game, self.unit_map).generate()
         CargoShipGenerator(self.mission, self.game, self.unit_map).generate()
+        if self.restore is not None:
+            # Before the wrecks, so they are pruned against where units stand.
+            self.restore.place_ground(self.mission, self.unit_map)
 
         self.generate_destroyed_units()
 
@@ -318,6 +321,7 @@ class MissionGenerator:
                 self.unit_map,
                 self.radio_registry,
                 self.mission_data,
+                restore=self.restore,
             )
             ground_conflict_gen.generate()
 
