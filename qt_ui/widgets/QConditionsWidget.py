@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
 )
 
+from game import Game
 from game.weather.conditions import Conditions
 from qt_ui.companionlinkcontroller import CompanionLinkController
 from qt_ui.simcontroller import SimController
@@ -49,12 +50,13 @@ class QConditionsWidget(QFrame):
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
         QConditionsDialog(self.time_turn_widget, self.weather_widget).exec()
 
-    def setCurrentTurn(self, turn: int, conditions: Conditions) -> None:
+    def setCurrentTurn(self, turn: int, conditions: Conditions, game: Game) -> None:
         """Sets the turn information display.
 
         :arg turn Current turn number.
         :arg conditions Current time and weather conditions.
+        :arg game The game shown.
         """
-        self.time_turn_widget.set_current_turn(turn, conditions)
+        self.time_turn_widget.set_current_turn(turn, conditions, game)
         self.weather_widget.setCurrentTurn(turn, conditions)
         self.weather_widget.show()

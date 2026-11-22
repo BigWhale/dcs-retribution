@@ -54,7 +54,7 @@ class QConditionsDialog(QDialog):
         game = sim.game_loop.game
         game.date = qdt.date() - timedelta(days=game.turn // 4)
         game.conditions.start_time = qdt
-        self.time_turn.set_current_turn(game.turn, game.conditions)
+        self.time_turn.set_current_turn(game.turn, game.conditions, game)
 
         # TODO: create new weather object
 

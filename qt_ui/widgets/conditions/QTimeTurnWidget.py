@@ -28,6 +28,8 @@ class QTimeTurnWidget(QGroupBox):
     ) -> None:
         super(QTimeTurnWidget, self).__init__("Turn")
         self.sim_controller = sim_controller
+        # The game shown, handed in with each turn update.
+        self.game: Optional[Game] = None
         self.setStyleSheet(
             "padding: 0px; margin-left: 5px; margin-right: 0px; margin-top: 1ex; margin-bottom: 5px; border-right: 0px"
         )
@@ -61,11 +63,15 @@ class QTimeTurnWidget(QGroupBox):
             companion_link.snapshot_received.connect(self.on_snapshot)
 
     def _dynamic_game(self) -> Optional[Game]:
-        """The loaded game when it is a dynamic campaign, else None."""
-        game_loop = self.sim_controller.game_loop
-        if game_loop is None or not game_loop.game.dynamic_campaign:
+        """The shown game when it is a dynamic campaign, else None.
+
+        Not asked of the game loop: the top panel hears of a loaded game
+        before the loop is made for it (no loop yet before Begin Campaign).
+        """
+        game = self.game
+        if game is None or not game.dynamic_campaign:
             return None
-        return game_loop.game
+        return game
 
     def on_sim_update(self, _events: GameUpdateEvents) -> None:
         time = self.sim_controller.current_time_in_sim_if_game_loaded
@@ -90,7 +96,7 @@ class QTimeTurnWidget(QGroupBox):
         self.daytime_icon.setPixmap(self.icons[time_of_day])
         self.set_date_and_time(now)
 
-    def set_current_turn(self, turn: int, conditions: Conditions) -> None:
+    def set_current_turn(self, turn: int, conditions: Conditions, game: Game) -> None:
         """Sets the turn information display.
 
         In a dynamic campaign the box is the campaign time: the mission clock's
@@ -98,9 +104,10 @@ class QTimeTurnWidget(QGroupBox):
 
         :arg turn Current turn number.
         :arg conditions Current time and weather conditions.
+        :arg game The game shown.
         """
-        game = self._dynamic_game()
-        if game is not None:
+        self.game = game
+        if self._dynamic_game() is not None:
             self.setTitle("Campaign time")
             now = LiveStateContext.clock().now()
             if now is not None:

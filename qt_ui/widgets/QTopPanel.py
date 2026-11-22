@@ -148,7 +148,7 @@ class QTopPanel(QFrame):
         self.air_wing.setEnabled(True)
         self.transfers.setEnabled(True)
 
-        self.conditionsWidget.setCurrentTurn(game.turn, game.conditions)
+        self.conditionsWidget.setCurrentTurn(game.turn, game.conditions, game)
 
         if game.conditions.weather.clouds:
             base_m = game.conditions.weather.clouds.base
