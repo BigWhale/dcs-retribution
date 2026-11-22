@@ -33,6 +33,7 @@ from game.theater.bullseye import Bullseye
 from game.unitmap import UnitMap
 from .briefinggenerator import BriefingGenerator, MissionInfoGenerator
 from .cargoshipgenerator import CargoShipGenerator
+from .companionmarker import add_mission_marker
 from .convoygenerator import ConvoyGenerator
 from .drawingsgenerator import DrawingsGenerator
 from .environmentgenerator import EnvironmentGenerator
@@ -124,6 +125,8 @@ class MissionGenerator:
         # rather than the first player flight with a TGP.
         self.generate_ground_conflicts()
         self.generate_air_units(tgo_generator)
+        if self.game.dynamic_campaign and self.game.live.marker:
+            add_mission_marker(self.mission, self.game, self.game.live.marker)
 
         RebellionGenerator(self.mission, self.game).generate()
         TriggerGenerator(self.mission, self.game).generate()

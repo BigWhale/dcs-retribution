@@ -50,8 +50,10 @@ def saved_games(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return folder
 
 
-def new_game(dynamic: bool, squadrons_start_full: bool) -> Game:
-    campaign = Campaign.from_file(CAMPAIGN)
+def new_game(
+    dynamic: bool, squadrons_start_full: bool, campaign_file: Path = CAMPAIGN
+) -> Game:
+    campaign = Campaign.from_file(campaign_file)
     theater = campaign.load_theater(False)
     game = GameGenerator(
         FACTIONS[campaign.recommended_player_faction],
@@ -161,11 +163,12 @@ def test_dynamic_campaign_loaded_keeps_held_aircraft_and_pilots(
         assert s.available_pilots == free, s
 
 
-def generate_starting_mission(game: Game, folder: Path) -> None:
+def generate_starting_mission(game: Game, folder: Path) -> MissionSimulation:
     """Writes the mission as Begin Campaign does, parked aircraft and all."""
     sim = MissionSimulation(game)
     sim.begin_simulation()
     sim.generate_miz(folder / "start.miz")
+    return sim
 
 
 def test_dynamic_campaign_starting_mission_keeps_pilots_free(

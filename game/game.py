@@ -31,6 +31,7 @@ from .ato import Flight
 from .ato.flighttype import FlightType
 from .campaignloader import CampaignAirWingConfig
 from .coalition import Coalition
+from .companionlink.liverecord import LiveRecord
 from .db.gamedb import GameDb
 from .dcs.countries import country_with_name
 from .infos.information import Information
@@ -135,6 +136,9 @@ class Game:
         # Set once by the new-game wizard; the campaign follows a running DCS
         # mission through the DCS Companion. Never changed after creation.
         self.dynamic_campaign = False
+        #: A dynamic campaign's live record: its mission marker, name map and
+        #: event log cursor.
+        self.live = LiveRecord()
 
         self.db = GameDb()
 
@@ -188,6 +192,8 @@ class Game:
                 front_line.laser_code = self.laser_code_registry.alloc_laser_code()
         if not hasattr(self, "dynamic_campaign"):
             self.dynamic_campaign = False
+        if getattr(self, "live", None) is None:
+            self.live = LiveRecord()
         # Regenerate any state that was not persisted.
         self.on_load()
 
