@@ -318,6 +318,10 @@ def test_despawn_failure_stops_before_spawn(
         with pytest.raises(CommandError) as failed:
             despawn_and_spawn(commands, ["Spare 1", "Spare 2"], request())
         assert failed.value.status == status
+        assert str(failed.value).startswith(
+            f"despawn of 'Spare 1' failed: the companion answered {status}: "
+        )
+        assert TOKEN not in str(failed.value)
 
     assert [body["name"] for body, _ in fake.despawns] == ["Spare 1"] * 3
     assert fake.requests == []

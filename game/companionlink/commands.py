@@ -57,11 +57,17 @@ class CommandError(Exception):
         self.status = status
         #: The companion's `error`, or what went wrong; never the token.
         self.message = message
+        #: The step of a launch that failed (`despawn of 'Spare 1'`), if set.
+        self.step: Optional[str] = None
 
     def __str__(self) -> str:
         if self.status is None:
-            return self.message
-        return f"the companion answered {self.status}: {self.message}"
+            text = self.message
+        else:
+            text = f"the companion answered {self.status}: {self.message}"
+        if self.step is None:
+            return text
+        return f"{self.step} failed: {text}"
 
 
 class SpawnFailed(CommandError):
@@ -247,7 +253,18 @@ def despawn_and_spawn(
     on them. A group already gone is fine; any other despawn failure raises
     its CommandError before the spawn is asked, so nothing is spawned over a
     plane that may still stand there.
+
+    The error says which step failed: `despawn of 'Spare 1' failed: ...` or
+    `spawn of 'Uzi 1' failed: ...`.
     """
     for name in despawn:
-        commands.despawn(name)
-    return commands.spawn(request)
+        try:
+            commands.despawn(name)
+        except CommandError as e:
+            e.step = f"despawn of {name!r}"
+            raise
+    try:
+        return commands.spawn(request)
+    except CommandError as e:
+        e.step = f"spawn of {request.name!r}"
+        raise
