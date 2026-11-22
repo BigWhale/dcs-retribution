@@ -62,17 +62,23 @@ class WaitingForStart(AtDeparture):
     @property
     def waiting_for(self) -> str:
         """What the flight waits for: startup, taxi, takeoff or air start."""
-        if self.start_type is StartType.COLD:
-            return "startup"
-        elif self.start_type is StartType.WARM:
-            return "taxi"
-        elif self.start_type is StartType.RUNWAY:
-            return "takeoff"
-        elif self.start_type is StartType.IN_FLIGHT:
-            return "air start"
-        else:
-            raise ValueError(f"Unhandled StartType: {self.start_type}")
+        return waiting_for(self.start_type)
 
     @property
     def description(self) -> str:
         return f"Waiting for {self.waiting_for} at {self.start_time:%H:%M:%S}"
+
+
+def waiting_for(start_type: StartType) -> str:
+    """What a flight of `start_type` waits for: startup, taxi, takeoff or air
+    start."""
+    if start_type is StartType.COLD:
+        return "startup"
+    elif start_type is StartType.WARM:
+        return "taxi"
+    elif start_type is StartType.RUNWAY:
+        return "takeoff"
+    elif start_type is StartType.IN_FLIGHT:
+        return "air start"
+    else:
+        raise ValueError(f"Unhandled StartType: {start_type}")

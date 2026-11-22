@@ -30,7 +30,8 @@ from PySide6.QtWidgets import (
 )
 
 from game.ato.flight import Flight
-from game.ato.flightstate import WaitingForStart
+from game.ato.flightstate import Uninitialized, WaitingForStart
+from game.ato.flightstate.waitingforstart import waiting_for
 from game.ato.package import Package
 from game.companionlink.missionclock import dated_time
 from game.server import EventStream
@@ -72,16 +73,24 @@ class FlightDelegate(TwoColumnRowDelegate):
         elif (row, column) == (2, 0):
             if flight.launched and flight.coalition.game.dynamic_campaign:
                 return IN_FLIGHT
-            state = flight.state
             if flight.coalition.game.dynamic_campaign and isinstance(
-                state, WaitingForStart
+                flight.state, (Uninitialized, WaitingForStart)
             ):
-                # The time with its date when it is not on the clock's day.
-                now = self.game_model.sim_controller.current_time_in_sim_if_game_loaded
-                waiting = f"Waiting for {state.waiting_for}".title()
-                return f"{waiting} At {dated_time(state.start_time, now)}"
+                return self.waiting_text(flight)
             return flight.state.description.title()
         return ""
+
+    def waiting_text(self, flight: Flight) -> str:
+        """A dynamic campaign's flight not launched yet: it waits for its
+        Start time as its plan has it now (the sim never ticks its state on),
+        with the date when it is not on the clock's day."""
+        try:
+            start = flight.flight_plan.startup_time()
+            waiting = f"Waiting for {waiting_for(flight.start_type)}".title()
+        except Exception:
+            return flight.state.description.title()
+        now = self.game_model.sim_controller.current_time_in_sim_if_game_loaded
+        return f"{waiting} At {dated_time(start, now)}"
 
     def num_clients(self, index: QModelIndex) -> int:
         flight = self.flight(index)
