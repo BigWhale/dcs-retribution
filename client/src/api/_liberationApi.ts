@@ -529,6 +529,7 @@ export type LiveUnit = {
   speed: number;
   in_air: boolean;
   player: string | null;
+  sidc: string;
 };
 export type Game = {
   control_points: ControlPoint[];
