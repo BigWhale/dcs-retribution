@@ -11,9 +11,12 @@ the game's name map (`game.live.name_map`) by the names they are sent with,
 as the request goes out, so its losses are debriefed even before the spawn
 is confirmed; a launch tried again replaces them. Nothing is launched while
 the running mission is not the campaign's own
-(`game.live.following_own_mission`), and a spawn confirmed after the mission
-stopped being followed leaves its flight not launched: it launches again once
-the campaign's mission is followed.
+(`game.live.following_own_mission`), and a spawn confirmed while the current
+mission is another's (decided foreign) leaves its flight not launched
+(`launch_failed`, not failed): it launches again once the campaign's mission
+is followed. A spawn confirmed while the link is merely lost or stale is
+launched: the mission may still be the campaign's, and launching it again
+could put a second group in it.
 
 A spawn the companion has accepted but not yet confirmed keeps its flight
 busy (not due, not editable, no Launch) while the worker follows it, up to
@@ -84,6 +87,7 @@ from game.companionlink.flightspawn import (
 )
 from game.companionlink.launching import due_flights
 from game.companionlink.linkstatus import LinkStatus
+from game.companionlink.liverecord import MissionVerdict
 from game.companionlink.livestate import LiveStateContext
 from game.companionlink.parking import ParkingClaims, ParkingPlan, plan_parking
 from game.companionlink.snapshot import LiveSnapshot
@@ -137,7 +141,8 @@ def package_locked(package: Package, launcher: Optional[FlightLauncher] = None) 
 class FlightLauncher(QObject):
     #: A Flight that spawned in the live mission, on the GUI thread.
     launched = Signal(object)
-    #: A Flight that did not launch and why, on the GUI thread.
+    #: A Flight that did not launch and why, on the GUI thread; also one whose
+    #: spawn was confirmed in another mission (it launches again).
     launch_failed = Signal(object, str)
     #: A Flight whose launch began (it is busy now), on the GUI thread.
     launch_started = Signal(object)
@@ -466,15 +471,18 @@ class FlightLauncher(QObject):
                 self._fail(flight, f"{flight} was not launched: {error}")
             return
         game = self._game
-        if game is not None and not game.live.following_own_mission:
-            # Its names, mapped at send, are replaced by the next launch.
+        if game is not None and game.live.current_verdict is MissionVerdict.FOREIGN:
+            # Not the campaign's mission: the flight launches again when it
+            # is. Its names, mapped at send, are replaced by that launch. Not
+            # failed, so it is due again; the signal ends the launch on screen.
             self._end_launch(flight)
             self._sent_as.pop(flight, None)
-            log.warning(
-                "Launch: %s spawned after the campaign's mission stopped being "
-                "followed; it launches again",
-                flight,
+            message = (
+                f"{flight} spawned after the campaign's mission stopped being "
+                "followed; it launches again"
             )
+            log.warning("Launch: %s", message)
+            self.launch_failed.emit(flight, message)
             return
         self._end_launch(flight)
         flight.launched = True

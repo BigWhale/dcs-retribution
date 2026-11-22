@@ -464,6 +464,8 @@ def test_spawn_confirmed_after_mission_turned_foreign(
     launcher = FlightLauncher(w.link)
     launcher.confirm_warn_s = launcher.confirm_cap_s = 30.0
     launcher.confirm_poll_s = 0.05
+    ended: list[tuple[Flight, str]] = []
+    launcher.launch_failed.connect(lambda f, message: ended.append((f, message)))
     launcher.set_game(game)
     try:
         w.wait_for(lambda: following(game) and launcher.receiving)
@@ -478,10 +480,12 @@ def test_spawn_confirmed_after_mission_turned_foreign(
 
         assert flight.launched is False
         assert flight.live_group_name is None
-        assert (
-            f"Launch: {flight} spawned after the campaign's mission stopped being "
+        said = (
+            f"{flight} spawned after the campaign's mission stopped being "
             "followed; it launches again"
-        ) in [r.getMessage() for r in caplog.records]
+        )
+        assert f"Launch: {said}" in [r.getMessage() for r in caplog.records]
+        assert ended == [(flight, said)]  # the launch ends on screen
 
         with commands.lock:
             commands.statuses = ["waiting"]
@@ -562,3 +566,51 @@ def test_drain_stops_when_nothing_held(
     assert game.live.cursor == 1000 and len(turns) == 2
     turns[1]()
     assert game.live.cursor == 1200 and len(turns) == 2
+
+
+def test_spawn_confirmed_while_link_stale_launched(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[[FakeCompanion], Window],
+    game: Game,
+    commands: FakeCommands,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stale link may still carry the campaign's mission: a spawn confirmed
+    then is launched, never sent a second time."""
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(companionlinkcontroller, "STALE_S", 1.0)
+    monkeypatch.setattr(companionlinkcontroller, "STALE_CHECK_MS", 50)
+    monkeypatch.setattr(
+        liberation_install, "companion_command_address", lambda: commands.address
+    )
+    monkeypatch.setattr(
+        liberation_install, "companion_command_token", lambda: COMMAND_TOKEN
+    )
+    commands.statuses = ["waiting"]
+    fake = serve([event("state", state(game, 1))])
+    w = window(fake)
+    launcher = FlightLauncher(w.link)
+    launcher.confirm_warn_s = launcher.confirm_cap_s = 30.0
+    launcher.confirm_poll_s = 0.05
+    launcher.set_game(game)
+    try:
+        w.wait_for(lambda: following(game) and launcher.receiving)
+        flight = plan_by_hand(game, 2)
+        launcher.launch_now(flight)
+        w.wait_for(lambda: len(commands.requests) == 1)
+
+        w.wait_for(
+            lambda: w.link.status_text()
+            == "Companion: waiting for a mission on the server"
+        )
+        assert not following(game)
+        with commands.lock:
+            commands.statuses = ["spawned"]
+        w.wait_for(lambda: not launcher.is_busy(flight))
+
+        assert flight.launched is True
+        assert not [r for r in caplog.records if "it launches again" in r.getMessage()]
+        assert len(commands.requests) == 1
+    finally:
+        launcher.stop()
