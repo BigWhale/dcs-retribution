@@ -260,33 +260,40 @@ class AircraftGenerator:
             )
             flight.state = Completed(flight, self.game.settings)
 
-            group = FlightGroupSpawner(
-                flight,
-                country,
-                self.mission,
-                self.helipads,
-                self.ground_spawns_roadbase,
-                self.ground_spawns_large,
-                self.ground_spawns,
-                self.mission_data,
-            ).create_idle_aircraft()
-            if group:
-                if (
-                    squadron.coalition.player.is_red
-                    and squadron.aircraft.flyable
-                    and (
-                        self.game.settings.enable_squadron_pilot_limits
-                        or squadron.number_of_available_pilots > 0
-                    )
-                    and self.game.settings.untasked_opfor_client_slots
-                ):
-                    flight.state = WaitingForStart(
-                        flight, self.game.settings, self.game.conditions.start_time
-                    )
-                    group.uncontrolled = False
-                    group.units[0].skill = Skill.Client
-                AircraftPainter(flight, group).apply_livery()
-                self.unit_map.add_aircraft(group, flight)
+            try:
+                group = FlightGroupSpawner(
+                    flight,
+                    country,
+                    self.mission,
+                    self.helipads,
+                    self.ground_spawns_roadbase,
+                    self.ground_spawns_large,
+                    self.ground_spawns,
+                    self.mission_data,
+                ).create_idle_aircraft()
+                if group:
+                    if (
+                        squadron.coalition.player.is_red
+                        and squadron.aircraft.flyable
+                        and (
+                            self.game.settings.enable_squadron_pilot_limits
+                            or squadron.number_of_available_pilots > 0
+                        )
+                        and self.game.settings.untasked_opfor_client_slots
+                    ):
+                        flight.state = WaitingForStart(
+                            flight, self.game.settings, self.game.conditions.start_time
+                        )
+                        group.uncontrolled = False
+                        group.units[0].skill = Skill.Client
+                    AircraftPainter(flight, group).apply_livery()
+                    self.unit_map.add_aircraft(group, flight)
+            finally:
+                if self.game.dynamic_campaign:
+                    # Its pilot would come back when the next turn begins, which
+                    # a dynamic campaign never does: a parked aircraft holds none.
+                    for index in range(flight.count):
+                        flight.set_pilot(index, None)
 
     def create_and_configure_flight(
         self, flight: Flight, country: Country, dynamic_runways: Dict[str, RunwayData]

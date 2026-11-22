@@ -17,6 +17,7 @@ import pytest
 
 from game import persistency
 from game.ato.flight import Flight
+from game.ato.flightroster import FlightRoster
 from game.ato.flighttype import FlightType
 from game.ato.package import Package
 from game.ato.starttype import StartType
@@ -26,8 +27,9 @@ from game.game import Game
 from game.migrator import Migrator
 from game.settings import Settings
 from game.sim import GameUpdateEvents
+from game.sim.missionsimulation import MissionSimulation
 from game.squadrons import Squadron
-from game.theater import ParkingType
+from game.theater import Airfield, ParkingType
 from game.theater.start_generator import GameGenerator, GeneratorSettings, ModSettings
 from pydcs_extensions import load_mods
 
@@ -39,6 +41,9 @@ def saved_games(tmp_path_factory: pytest.TempPathFactory) -> Path:
     from qt_ui.main import inject_custom_payloads
 
     folder = tmp_path_factory.mktemp("saved_games")
+    # persistency creates missing folders with mode 755 *decimal*, which leaves
+    # them unlistable; mission generation lists the kneeboards folder.
+    (folder / "Retribution" / "Kneeboards").mkdir(parents=True)
     persistency.setup(str(folder), False, 16880)
     load_mods()
     inject_custom_payloads(folder)
@@ -90,6 +95,8 @@ def plan_by_hand(game: Game, count: int, squadron: Squadron | None = None) -> Fl
     package = Package(squadron.location, game.db.flights, auto_asap=True)
     flight = Flight(package, squadron, count, FlightType.BARCAP, StartType.COLD, None)
     package.add_flight(flight)
+    flight.recreate_flight_plan()
+    package.set_tot_asap(game.conditions.start_time)
     game.blue.ato.add_package(package)
     return flight
 
@@ -154,7 +161,47 @@ def test_dynamic_campaign_loaded_keeps_held_aircraft_and_pilots(
         assert s.available_pilots == free, s
 
 
-def test_normal_campaign_unchanged(saved_games: Path) -> None:
+def generate_starting_mission(game: Game, folder: Path) -> None:
+    """Writes the mission as Begin Campaign does, parked aircraft and all."""
+    sim = MissionSimulation(game)
+    sim.begin_simulation()
+    sim.generate_miz(folder / "start.miz")
+
+
+def test_dynamic_campaign_starting_mission_keeps_pilots_free(
+    saved_games: Path, tmp_path: Path
+) -> None:
+    """The starting mission parks the untasked aircraft; they hold no pilot."""
+    game = new_game(dynamic=True, squadrons_start_full=True)
+    flight = plan_by_hand(game, 2)
+    pilots = [p for p in flight.roster.iter_pilots() if p is not None]
+    game.pass_turn(no_action=True)
+
+    generate_starting_mission(game, tmp_path)
+
+    for s in squadrons(game):
+        free = [p for p in s.active_pilots if not any(p is q for q in pilots)]
+        assert s.available_pilots == free, s
+    # A flight created as the Create flight dialog does, as big as the airfield
+    # squadron that parked the most aircraft can crew, has all its pilots.
+    squadron = max(
+        (
+            s
+            for s in game.blue.air_wing.iter_squadrons()
+            if isinstance(s.location, Airfield)
+        ),
+        key=lambda s: s.untasked_aircraft,
+    )
+    size = min(squadron.untasked_aircraft, len(squadron.active_pilots))
+    package = Package(squadron.location, game.db.flights, auto_asap=True)
+    roster = FlightRoster(squadron, initial_size=size)
+    created = Flight(
+        package, squadron, size, FlightType.BARCAP, StartType.COLD, None, roster=roster
+    )
+    assert created.missing_pilots == 0
+
+
+def test_normal_campaign_unchanged(saved_games: Path, tmp_path: Path) -> None:
     """Not full when not ticked; Begin Campaign clears the hand-planned flight."""
     assert all(
         s.owned_aircraft == 0
@@ -166,3 +213,15 @@ def test_normal_campaign_unchanged(saved_games: Path) -> None:
     game.pass_turn(no_action=True)
 
     assert flight not in [f for p in game.blue.ato.packages for f in p.flights]
+
+    # The parked aircraft hold a pilot each until the next turn, as before.
+    held = sum(
+        f.count
+        for c in (game.blue, game.red)
+        for p in c.ato.packages
+        for f in p.flights
+    )
+    generate_starting_mission(game, tmp_path)
+    active = sum(len(s.active_pilots) for s in squadrons(game))
+    available = sum(len(s.available_pilots) for s in squadrons(game))
+    assert available < active - held
