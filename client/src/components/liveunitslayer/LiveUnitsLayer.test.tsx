@@ -47,6 +47,7 @@ const unit = (
   sidc: string,
   heading: number,
   speed: number,
+  flight_id: string | null = null,
 ) => ({
   name: name,
   group: `${name} group`,
@@ -60,11 +61,15 @@ const unit = (
   in_air: speed > 0,
   player: null,
   sidc: sidc,
+  flight_id: flight_id,
 });
 
 // The icons are cached by look for the whole run, so each test draws codes
 // of its own, or a symbol drawn by an earlier test would not be drawn again.
-const renderUnits = (units: ReturnType<typeof unit>[]) =>
+const renderUnits = (
+  units: ReturnType<typeof unit>[],
+  selected: string | null = null,
+) =>
   renderWithProviders(
     <LiveUnitsLayer categories={["plane", "ground", "static"]} />,
     {
@@ -72,6 +77,7 @@ const renderUnits = (units: ReturnType<typeof unit>[]) =>
         liveUnits: {
           units: Object.fromEntries(units.map((u) => [u.name, u])),
         },
+        flights: { flights: {}, selected: selected },
       },
     },
   );
@@ -116,4 +122,30 @@ test("tail only on a moving unit", async () => {
   const [tank] = symbolOptionsFor("10061000001211000000");
   expect(tank.direction).toBeUndefined();
   expect(tank.speedLeader ?? 0).toBe(0);
+});
+
+test("outlines the selected flight's units", async () => {
+  const units = [
+    unit("Enfield 1-1", "plane", 2, "10030100001101050000", 90, 200, "f-1"),
+    unit("Enfield 1-2", "plane", 2, "10030100001101060000", 90, 200, "f-1"),
+    unit("Tank 3", "ground", 1, "10061000001221000000", 0, 0),
+  ];
+  const outlined = (sidc: string) =>
+    symbolOptionsFor(sidc).map((options) => [
+      options.outlineColor,
+      options.outlineWidth,
+    ]);
+
+  // Drawn first with no flight selected, so the outlined icons below cannot
+  // come from the cache.
+  renderUnits(units, null);
+  for (const u of units) {
+    expect(outlined(u.sidc)).toEqual([[undefined, undefined]]);
+  }
+
+  symbolSpy.mockClear();
+  renderUnits(units, "f-1");
+  expect(outlined("10030100001101050000")).toEqual([["yellow", 2]]);
+  expect(outlined("10030100001101060000")).toEqual([["yellow", 2]]);
+  expect(outlined("10061000001221000000")).toEqual([]);
 });

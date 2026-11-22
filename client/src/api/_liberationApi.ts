@@ -530,6 +530,7 @@ export type LiveUnit = {
   in_air: boolean;
   player: string | null;
   sidc: string;
+  flight_id: string | null;
 };
 export type Game = {
   control_points: ControlPoint[];
