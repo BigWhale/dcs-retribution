@@ -172,25 +172,33 @@ class LiveRecord:
                 held.add(e.seq)
         self._pending.sort(key=lambda e: e.seq)
 
-    def ready(self) -> list[LogEntry]:
-        """The held entries of the accepted mission, oldest first.
+    def ready(self, limit: Optional[int] = None) -> list[LogEntry]:
+        """The held entries of the accepted mission, oldest first, at most
+        `limit` of them.
 
         Stops at the first entry of a mission not yet decided. Entries of a
         mission decided against, or of one of the campaign's earlier missions,
-        are dropped and the cursor moves past them.
+        are dropped and the cursor moves past them, but only before any entry
+        is handed out: after one, the call stops at the next entry to drop,
+        which waits for the next call, once `applied` has moved the cursor. So
+        the cursor never passes an entry handed out and not applied yet.
         """
         out: list[LogEntry] = []
         taken = 0
         for e in self._pending:
+            if limit is not None and len(out) >= limit:
+                break
             known = self.verdicts.get(e.mission)
             if known is None:
                 break
-            taken += 1
             verdict, uuid = known
             if verdict is MissionVerdict.FOREIGN or uuid != self.map_marker:
+                if out:
+                    break
                 self.applied(e.seq)
-                continue
-            out.append(e)
+            else:
+                out.append(e)
+            taken += 1
         del self._pending[:taken]
         return out
 

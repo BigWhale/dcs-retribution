@@ -283,6 +283,44 @@ def test_entries_wait_for_their_mission() -> None:
     assert record.cursor == 14
 
 
+def test_cursor_never_passes_entries_handed_out() -> None:
+    """A dropped entry after own ones waits until they are applied, so a save
+    in between never moves the cursor past an entry not applied yet."""
+    record = LiveRecord()
+    marker = MARKER_PREFIX + record.new_marker()
+    record.written(LiveUnitMap())
+    record.receive(EventBatch((), through=10))
+    record.decide(snapshot("own", 1, marker))
+    record.decide(snapshot("other", 1))
+    record.receive(
+        EventBatch(
+            (
+                entry(11, "own", 1),
+                entry(12, "own", 1),
+                entry(13, "other", 1),
+                entry(14, "own", 1),
+                entry(15, "own", 1),
+            ),
+            through=15,
+        )
+    )
+
+    assert [e.seq for e in record.ready()] == [11, 12]
+    assert record.cursor == 10
+    record.applied(12)
+    assert [e.seq for e in record.ready()] == [14, 15]
+    assert record.cursor == 13
+    record.applied(15)
+    assert record.cursor == 15
+
+    record.receive(
+        EventBatch(tuple(entry(s, "own", 1) for s in (16, 17, 18)), through=18)
+    )
+    assert [e.seq for e in record.ready(limit=2)] == [16, 17]
+    record.applied(17)
+    assert [e.seq for e in record.ready(limit=2)] == [18]
+
+
 def test_lost_mission_is_not_followed() -> None:
     """Review Focus 5: only the campaign's own mission is followed."""
     record = LiveRecord()
