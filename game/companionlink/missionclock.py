@@ -66,3 +66,11 @@ class MissionClock:
 
 def _wall(wall: Optional[float]) -> float:
     return time.monotonic() if wall is None else wall
+
+
+def dated_time(t: datetime, now: Optional[datetime]) -> str:
+    """`t` as `23:58` on `now`'s day (or with no `now`), as `14 Jul 00:12` on
+    another day."""
+    if now is None or t.date() == now.date():
+        return f"{t:%H:%M}"
+    return f"{t:%d %b %H:%M}"

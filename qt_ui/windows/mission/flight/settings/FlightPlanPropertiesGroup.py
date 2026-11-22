@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 from game import Game
 from game.ato.flight import Flight
 from game.ato.flightplans.planningerror import PlanningError
+from game.companionlink.missionclock import dated_time
 from qt_ui.models import PackageModel
 from qt_ui.widgets.QLabeledWidget import QLabeledWidget
 from qt_ui.widgets.combos.QArrivalAirfieldSelector import QArrivalAirfieldSelector
@@ -106,9 +107,13 @@ class FlightPlanPropertiesGroup(QGroupBox):
             # handler may be called for a flight whose package has been canceled, which
             # is an invalid state for calling anything in TotEstimator.
             return
-        self.departure_time.setText(
-            f"At {self.flight.flight_plan.startup_time():%H:%M:%S}"
-        )
+        startup = self.flight.flight_plan.startup_time()
+        if self.game.dynamic_campaign:
+            # The time with its date when it is not on the clock's day.
+            now = self.package_model.now()
+            self.departure_time.setText(f"At {dated_time(startup, now)}")
+        else:
+            self.departure_time.setText(f"At {startup:%H:%M:%S}")
         self.flight_wpt_list.update_list()
 
     def set_divert(self, index: int) -> None:

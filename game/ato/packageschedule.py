@@ -64,9 +64,21 @@ def change_start_type(flight: Flight, start_type: StartType, now: datetime) -> N
     if package.auto_asap:
         package.set_tot_asap(now)
         return
+    keep_start(package, before)
+
+
+def keep_start(package: Package, start: datetime | None) -> None:
+    """Moves the TOT so the package starts at `start` again, after its flights
+    changed (a start type, a flight added).
+
+    Nothing with ASAP (the TOT is worked out from now) or when the package had
+    no Start time before the change (its first flight).
+    """
+    if start is None or package.auto_asap:
+        return
     after = package_start_time(package)
-    if before is not None and after is not None:
-        package.time_over_target += before - after
+    if after is not None:
+        package.time_over_target += start - after
 
 
 def start_asap(package: Package, now: datetime) -> None:

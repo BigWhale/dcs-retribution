@@ -51,6 +51,9 @@ class QFlightStartType(QGroupBox):
 
         if isinstance(self.flight.departure, OffMapSpawn):
             return
+        elif self.package_model.dynamic_campaign:
+            self._change_dynamic_start_type()
+            return
         elif self.flight.roster.player_count > 0:
             self.flight.start_type = (
                 self.flight.coalition.game.settings.default_start_type_client
@@ -66,5 +69,22 @@ class QFlightStartType(QGroupBox):
 
     def _on_start_type_selected(self):
         selected = self.start_type.currentData()
+        if self.package_model.dynamic_campaign:
+            # The package keeps its Start time; its TOT moves.
+            self.package_model.change_start_type(self.flight, selected)
+            return
         self.flight.start_type = selected
         self.package_model.update_tot()
+
+    def _change_dynamic_start_type(self) -> None:
+        """A dynamic campaign's pilot change: the start type for players or
+        for AI, the package keeping its Start time."""
+        settings = self.flight.coalition.game.settings
+        if self.flight.roster.player_count > 0:
+            start_type = settings.default_start_type_client
+        else:
+            start_type = settings.default_start_type
+        self.package_model.change_start_type(self.flight, start_type)
+        blocked = self.start_type.blockSignals(True)
+        self.start_type.setCurrentText(start_type.value)
+        self.start_type.blockSignals(blocked)

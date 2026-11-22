@@ -1,11 +1,13 @@
 """Dialogs for creating and editing ATO packages."""
 
 import logging
-from typing import Optional
+from datetime import datetime
+from typing import Callable, Optional
 
-from PySide6.QtCore import QItemSelection, QTime, Qt, Signal
+from PySide6.QtCore import QDate, QDateTime, QItemSelection, QTime, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QDateTimeEdit,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -19,6 +21,7 @@ from PySide6.QtWidgets import (
 from game.ato.flight import Flight
 from game.ato.flightplans.planningerror import PlanningError
 from game.ato.package import Package
+from game.ato.packageschedule import keep_start, package_start_time, start_asap
 from game.game import Game
 from game.radio.radios import RadioFrequency
 from game.server import EventStream
@@ -89,19 +92,34 @@ class QPackageDialog(QDialog):
         self.tot_column = QHBoxLayout()
         self.summary_row.addLayout(self.tot_column)
 
+        # A dynamic campaign plans against the live mission's clock: a Start
+        # time and a TOT, each with its date, moved together.
+        self.dynamic = self.package_model.dynamic_campaign
+        if self.dynamic:
+            self.start_label = QLabel("Start time:")
+            self.tot_column.addWidget(self.start_label)
+            self.start_edit = self.date_time_edit(self.on_start_edited)
+            self.start_edit.setToolTip("When the package's first flight starts")
+            self.tot_column.addWidget(self.start_edit)
+
         self.tot_label = QLabel("Time Over Target:")
         self.tot_column.addWidget(self.tot_label)
 
-        self.tot_spinner = QTimeEdit(self.tot_qtime())
-        self.tot_spinner.setMinimumTime(QTime(0, 0))
-        self.tot_spinner.setDisplayFormat("hh:mm:ss")
-        self.tot_spinner.timeChanged.connect(self.save_tot)
-        self.tot_spinner.setToolTip("Package TOT relative to mission TOT")
-        self.tot_spinner.setEnabled(
-            not self.package_model.package.auto_asap
-            and self.package_model.package.all_flights_waiting_for_start()
-        )
-        self.tot_column.addWidget(self.tot_spinner)
+        if self.dynamic:
+            self.tot_edit = self.date_time_edit(self.on_tot_edited)
+            self.tot_edit.setToolTip("Package TOT")
+            self.tot_column.addWidget(self.tot_edit)
+        else:
+            self.tot_spinner = QTimeEdit(self.tot_qtime())
+            self.tot_spinner.setMinimumTime(QTime(0, 0))
+            self.tot_spinner.setDisplayFormat("hh:mm:ss")
+            self.tot_spinner.timeChanged.connect(self.save_tot)
+            self.tot_spinner.setToolTip("Package TOT relative to mission TOT")
+            self.tot_spinner.setEnabled(
+                not self.package_model.package.auto_asap
+                and self.package_model.package.all_flights_waiting_for_start()
+            )
+            self.tot_column.addWidget(self.tot_spinner)
 
         self.auto_asap = QCheckBox("ASAP")
         self.auto_asap.setToolTip(
@@ -121,6 +139,9 @@ class QPackageDialog(QDialog):
         self.tot_help_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.tot_help_label.setOpenExternalLinks(True)
         self.tot_column.addWidget(self.tot_help_label)
+
+        if self.dynamic:
+            self.update_times()
 
         self.package_view = QFlightList(self.game_model, self.package_model)
         self.package_view.selectionModel().selectionChanged.connect(
@@ -190,6 +211,13 @@ class QPackageDialog(QDialog):
         # TODO: Cache package start state and only update if valid
         if not self.package_valid():
             return
+        if self.dynamic:
+            # ASAP starts the package now, once: its later flights keep their
+            # times.
+            if self.package_model.package.auto_asap:
+                start_asap(self.package_model.package, self.package_model.now())
+                self.package_model.update_tot()
+            return
         self.save_tot()
 
     def save_tot(self) -> None:
@@ -203,11 +231,61 @@ class QPackageDialog(QDialog):
 
     def set_asap(self, checked: bool) -> None:
         self.package_model.set_asap(checked)
+        if self.dynamic:
+            # The model's tot_changed has shown the times and their state.
+            return
         self.tot_spinner.setEnabled(not self.package_model.package.auto_asap)
         self.update_tot()
 
     def update_tot(self) -> None:
+        if self.dynamic:
+            self.update_times()
+            return
         self.tot_spinner.setTime(self.tot_qtime())
+
+    def date_time_edit(self, on_edited: Callable[[QDateTime], None]) -> QDateTimeEdit:
+        """A dynamic campaign's time field: date and time, in mission time."""
+        edit = QDateTimeEdit()
+        edit.setTimeSpec(Qt.TimeSpec.UTC)
+        edit.setDisplayFormat("dd MMM HH:mm")
+        # Only a finished edit counts: no half-typed time moves the package.
+        edit.setKeyboardTracking(False)
+        # (PySide6 6.4's stub lacks the signal.)
+        edit.dateTimeChanged.connect(on_edited)  # type: ignore[attr-defined]
+        return edit
+
+    def update_times(self) -> None:
+        """Shows a dynamic campaign's Start time and TOT, signals blocked so
+        the refresh is never taken for an edit.
+
+        Each field's floor is the campaign's current time, or the time shown
+        if that is earlier: a package already in the past is not moved until
+        the user edits it.
+        """
+        package = self.package_model.package
+        now = self.package_model.now()
+        editable = not package.auto_asap and package.all_flights_waiting_for_start()
+        show_time(self.tot_edit, package.time_over_target, now)
+        self.tot_edit.setEnabled(editable)
+        start = package_start_time(package)
+        if start is None:
+            show_empty(self.start_edit)
+            self.start_edit.setEnabled(False)
+        else:
+            show_time(self.start_edit, start, now)
+            self.start_edit.setEnabled(editable)
+
+    def on_start_edited(self, value: QDateTime) -> None:
+        start = python_time(value)
+        if start == shown(package_start_time(self.package_model.package)):
+            return
+        self.package_model.set_start(start)
+
+    def on_tot_edited(self, value: QDateTime) -> None:
+        tot = python_time(value)
+        if tot == shown(self.package_model.package.time_over_target):
+            return
+        self.package_model.set_tot(tot)
 
     def on_selection_changed(
         self, selected: QItemSelection, _deselected: QItemSelection
@@ -236,9 +314,13 @@ class QPackageDialog(QDialog):
 
     def add_flight(self, flight: Flight) -> None:
         """Adds the new flight to the package."""
+        # A dynamic campaign's package keeps its Start time.
+        start = package_start_time(self.package_model.package) if self.dynamic else None
         self.package_model.add_flight(flight)
         try:
             flight.recreate_flight_plan()
+            if self.dynamic:
+                keep_start(self.package_model.package, start)
             self.package_model.update_tot()
             EventStream.put_nowait(GameUpdateEvents().new_flight(flight))
         except PlanningError as ex:
@@ -425,3 +507,47 @@ class QEditPackageDialog(QPackageDialog):
         # The ATO model returns inventory for us when deleting a package.
         self.ato_model.cancel_or_abort_package(self.package_model.package)
         self.close()
+
+
+def qt_time(t: datetime) -> QDateTime:
+    """A mission time for a time field; UTC so no local DST shifts it."""
+    return QDateTime(
+        QDate(t.year, t.month, t.day),
+        QTime(t.hour, t.minute, t.second),
+        Qt.TimeSpec.UTC,
+    )
+
+
+def python_time(value: QDateTime) -> datetime:
+    date, time = value.date(), value.time()
+    return datetime(
+        date.year(), date.month(), date.day(), time.hour(), time.minute(), time.second()
+    )
+
+
+def shown(t: Optional[datetime]) -> Optional[datetime]:
+    """`t` as a time field holds it, to the second: a finished edit that
+    changed nothing is not taken for a move."""
+    return None if t is None else t.replace(microsecond=0)
+
+
+def show_time(edit: QDateTimeEdit, t: datetime, now: datetime) -> None:
+    """Shows `t` in a time field, its floor now or `t` if earlier."""
+    blocked = edit.blockSignals(True)
+    try:
+        edit.setSpecialValueText("")
+        edit.setMinimumDateTime(qt_time(min(t, now)))
+        edit.setDateTime(qt_time(t))
+    finally:
+        edit.blockSignals(blocked)
+
+
+def show_empty(edit: QDateTimeEdit) -> None:
+    """Shows a time field with no time."""
+    blocked = edit.blockSignals(True)
+    try:
+        # A spin box shows its special value text at its minimum.
+        edit.setSpecialValueText(" ")
+        edit.setDateTime(edit.minimumDateTime())
+    finally:
+        edit.blockSignals(blocked)

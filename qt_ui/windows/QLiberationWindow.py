@@ -91,6 +91,9 @@ class QLiberationWindow(QMainWindow):
         self.flight_launcher = FlightLauncher(self.companion_link, self)
         self.flight_launcher.launch_failed.connect(self.on_launch_failed)
         self.ato_panel = QAirTaskingOrderPanel(self.game_model, self.flight_launcher)
+        # Each snapshot moves the mission clock: the lists' times are dated
+        # against it.
+        self.companion_link.snapshot_received.connect(self.ato_panel.on_launch_changed)
         self.info_panel = QInfoPanel(self.game)
         self.liberation_map = QLiberationMap(
             self.game_model, ui_flags.dev_ui_webserver, self

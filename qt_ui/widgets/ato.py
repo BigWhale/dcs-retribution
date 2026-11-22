@@ -30,7 +30,9 @@ from PySide6.QtWidgets import (
 )
 
 from game.ato.flight import Flight
+from game.ato.flightstate import WaitingForStart
 from game.ato.package import Package
+from game.companionlink.missionclock import dated_time
 from game.server import EventStream
 from game.sim import GameUpdateEvents
 from .QLabeledWidget import QLabeledWidget
@@ -43,9 +45,10 @@ IN_FLIGHT = "In Flight"
 
 
 class FlightDelegate(TwoColumnRowDelegate):
-    def __init__(self, package: Package) -> None:
+    def __init__(self, package: Package, game_model: GameModel) -> None:
         super().__init__(rows=3, columns=2, font_size=10)
         self.package = package
+        self.game_model = game_model
 
     @staticmethod
     def flight(index: QModelIndex) -> Flight:
@@ -69,6 +72,16 @@ class FlightDelegate(TwoColumnRowDelegate):
         elif (row, column) == (2, 0):
             if flight.launched and flight.coalition.game.dynamic_campaign:
                 return IN_FLIGHT
+            state = flight.state
+            if flight.coalition.game.dynamic_campaign and isinstance(
+                state, WaitingForStart
+            ):
+                # The time with its date when it is not on the clock's day.
+                now = self.game_model.sim_controller.current_time_in_sim_if_game_loaded
+                waiting = state.description.removesuffix(
+                    f" at {state.start_time:%H:%M:%S}"
+                )
+                return f"{waiting.title()} At {dated_time(state.start_time, now)}"
             return flight.state.description.title()
         return ""
 
@@ -92,7 +105,7 @@ class QFlightList(QListView):
         self.launcher = launcher
         self.set_package(package_model)
         if package_model is not None:
-            self.setItemDelegate(FlightDelegate(package_model.package))
+            self.setItemDelegate(FlightDelegate(package_model.package, game_model))
         self.setIconSize(QSize(91, 24))
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.doubleClicked.connect(self.on_double_click)
@@ -103,7 +116,7 @@ class QFlightList(QListView):
             self.disconnect_model()
         else:
             self.package_model = model
-            self.setItemDelegate(FlightDelegate(model.package))
+            self.setItemDelegate(FlightDelegate(model.package, self.game_model))
             self.setModel(model)
             # noinspection PyUnresolvedReferences
             model.deleted.connect(self.disconnect_model)
@@ -354,6 +367,10 @@ class PackageDelegate(TwoColumnRowDelegate):
             clients = self.num_clients(index)
             return f"Player Slots: {clients}" if clients else ""
         elif (row, column) == (1, 0):
+            game = self.game_model.game
+            if game is not None and game.dynamic_campaign:
+                now = self.game_model.sim_controller.current_time_in_sim_if_game_loaded
+                return f"TOT at {dated_time(package.time_over_target, now)}"
             return f"TOT at {package.time_over_target:%H:%M:%S}"
         elif (row, column) == (1, 1):
             unassigned_pilots = self.missing_pilots(index)
@@ -627,7 +644,8 @@ class QAirTaskingOrderPanel(QSplitter):
             launcher.receiving_changed.connect(self.on_launch_changed)
 
     def on_launch_changed(self, *_args: object) -> None:
-        """A flight's launch began or ended: redraws the ATO and its buttons."""
+        """A flight's launch began or ended, or a snapshot came: redraws the
+        ATO and its buttons."""
         for ato_model in (self.game_model.ato_model, self.game_model.red_ato_model):
             ato_model.on_sim_update(GameUpdateEvents())
         package_model = self.flight_panel.package_model

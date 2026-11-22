@@ -14,6 +14,7 @@ from typing import Any
 
 from game.ato.packageschedule import (
     change_start_type,
+    keep_start,
     move_start,
     move_tot,
     package_start_time,
@@ -142,6 +143,31 @@ def test_start_type_change_keeps_start() -> None:
 
     assert two.time_over_target == at("15:08")
     assert package_start_time(two) == at("14:28")
+
+
+def test_added_flight_keeps_start() -> None:
+    p = package(at("15:00"), StartType.IN_FLIGHT)
+    before = package_start_time(p)
+    assert before == at("14:36")
+
+    FakeFlight(p, StartType.COLD)
+    keep_start(p, before)
+
+    assert p.time_over_target == at("15:16")
+    assert package_start_time(p) == at("14:36")
+
+    first = package(at("15:00"))
+    FakeFlight(first, StartType.COLD)
+    keep_start(first, None)
+
+    assert first.time_over_target == at("15:00")
+
+    asap = package(at("15:00"), StartType.IN_FLIGHT, auto_asap=True)
+    before = package_start_time(asap)
+    FakeFlight(asap, StartType.COLD)
+    keep_start(asap, before)
+
+    assert asap.time_over_target == at("15:00")
 
 
 def test_start_type_change_with_asap_starts_now() -> None:

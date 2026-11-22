@@ -13,10 +13,12 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QIcon
 
+from game.ato import packageschedule
 from game.ato.airtaaskingorder import AirTaskingOrder
 from game.ato.flight import Flight
 from game.ato.flighttype import FlightType
 from game.ato.package import Package
+from game.ato.starttype import StartType
 from game.dcs.beacons import Beacons
 from game.game import Game
 from game.radio.RadioFrequencyContainer import RadioFrequencyContainer
@@ -196,8 +198,35 @@ class PackageModel(QAbstractListModel):
 
     def set_tot(self, tot: datetime.datetime) -> None:
         with self.game_model.sim_controller.paused_sim():
-            self.package.time_over_target = tot
+            if self.dynamic_campaign:
+                packageschedule.move_tot(self.package, tot, self.now())
+            else:
+                self.package.time_over_target = tot
             self.update_tot()
+
+    def set_start(self, start: datetime.datetime) -> None:
+        """A dynamic campaign's package starts at `start` (now at the
+        earliest); its TOT moves with it."""
+        with self.game_model.sim_controller.paused_sim():
+            packageschedule.move_start(self.package, start, self.now())
+            self.update_tot()
+
+    def change_start_type(self, flight: Flight, start_type: StartType) -> None:
+        """Sets a dynamic campaign's flight's start type, keeping its
+        package's Start time."""
+        with self.game_model.sim_controller.paused_sim():
+            packageschedule.change_start_type(flight, start_type, self.now())
+            self.update_tot()
+
+    @property
+    def dynamic_campaign(self) -> bool:
+        game = self.game_model.game
+        return game is not None and game.dynamic_campaign
+
+    def now(self) -> datetime.datetime:
+        """The campaign's current time: the mission clock in a dynamic
+        campaign."""
+        return self.game_model.sim_controller.current_time_in_sim
 
     def set_asap(self, asap: bool) -> None:
         with self.game_model.sim_controller.paused_sim():
