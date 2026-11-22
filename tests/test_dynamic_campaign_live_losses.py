@@ -31,8 +31,12 @@ from dcs.terrain.terrain import Terrain
 
 from game import persistency
 from game.ato.flight import Flight
-from game.companionlink.eventlog import EventBatch, LogEntry, LogRef
+from game.ato.flighttype import FlightType
+from game.ato.package import Package
+from game.ato.starttype import StartType
+from game.companionlink.eventlog import EventBatch, LogEntry, LogPos, LogRef
 from game.companionlink.link import LinkStatus
+from game.companionlink.livelosses import apply_entries, finish_flight, settle
 from game.companionlink.liverecord import (
     MARKER_PREFIX,
     LiveRecord,
@@ -46,14 +50,24 @@ from game.game import Game
 from game.migrator import Migrator
 from game.missiongenerator.companionmarker import add_mission_marker
 from game.sim.missionsimulation import MissionSimulation
-from game.squadrons import Pilot
-from game.theater import ControlPoint, TheaterUnit
+from game.squadrons import Pilot, Squadron
+from game.squadrons.pilot import PilotStatus
+from game.theater import (
+    Airfield,
+    Carrier,
+    ControlPoint,
+    Lha,
+    OffMapSpawn,
+    Player,
+    TheaterUnit,
+)
 from game.transfers import CargoShip, Convoy, TransferOrder
 from tests.test_dynamic_campaign_air_wing import (
     generate_starting_mission,
     new_game,
     plan_by_hand,
     saved_games,  # noqa: F401 (the fixture)
+    squadrons,
 )
 
 CAMPAIGN = Path("resources/campaigns/golan_heights_lite.yaml")
@@ -429,3 +443,340 @@ def test_record_survives_save_and_load(started: Started, tmp_path: Path) -> None
     for field, value in vars(record.name_map).items():
         assert getattr(live.name_map, field).keys() == value.keys(), field
     assert live.ready() == []  # held entries are not saved; the link reads again
+
+
+# Losses applied: entries of the campaign's own mission, applied as a turn
+# applies a mission's results. Each test mutates its game, so each makes one.
+
+BOOT, SESSION = "boot", 1
+
+
+@dataclass
+class Live:
+    game: Game
+    flight: Flight  # launched, as "LIVE 1-1" and "LIVE 1-2"
+
+
+@pytest.fixture
+def live(saved_games: Path, tmp_path: Path) -> Live:
+    """Begin Campaign's mission accepted, a flight planned since launched."""
+    game = new_game(dynamic=True, squadrons_start_full=True, campaign_file=CAMPAIGN)
+    game.pass_turn(no_action=True)
+    uuid = game.live.new_marker()
+    sim = generate_starting_mission(game, tmp_path)
+    assert sim.unit_map is not None
+    game.live.written(LiveUnitMap.from_generation(sim.unit_map, game))
+    verdict = game.live.decide(snapshot(BOOT, SESSION, MARKER_PREFIX + uuid))
+    assert verdict is MissionVerdict.OWN
+    flight = plan_by_hand(game, 2)
+    flight.launched = True
+    flight.live_group_name = "LIVE 1"
+    game.live.name_map.add_launched(flight, ["LIVE 1-1", "LIVE 1-2"])
+    return Live(game, flight)
+
+
+def log(
+    seq: int,
+    kind: str,
+    name: str = "",
+    other: str = "",
+    *,
+    category: str = "",
+    type: str = "",
+    player: str = "",
+    place: str = "",
+    side: int | None = None,
+    pos: LogPos | None = None,
+) -> LogEntry:
+    return LogEntry(
+        seq,
+        kind,
+        BOOT,
+        SESSION,
+        unit=LogRef(name, type, None, category, "", player) if name else None,
+        other=LogRef(other) if other else None,
+        place=place,
+        side=side,
+        pos=pos,
+    )
+
+
+def tgo_units(game: Game) -> list[tuple[str, TheaterUnit]]:
+    return [
+        (name, m.theater_unit) for name, m in game.live.name_map.theater_objects.items()
+    ]
+
+
+def ato_flights(game: Game, player: Player) -> list[Flight]:
+    ato = game.coalition_for(player).ato
+    return [f for p in ato.packages for f in p.flights]
+
+
+def test_tgo_unit_killed(live: Live) -> None:
+    name, unit = next((n, u) for n, u in tgo_units(live.game) if u.alive)
+
+    batch = apply_entries(live.game, [log(1, "dead", name, category="ground")])
+
+    assert unit.alive is False
+    assert unit.ground_object in batch.events.updated_tgos
+    assert batch.dead == [name]
+    assert batch.entries == 1
+
+
+def test_repeated_deaths_count_once_across_reload(live: Live, tmp_path: Path) -> None:
+    """Review Focus 1: one death told three times costs one aircraft, one pilot."""
+    squadron = live.flight.squadron
+    owned, destroyed = squadron.owned_aircraft, squadron.destroyed_aircraft
+
+    apply_entries(live.game, [log(1, "dead", "LIVE 1-1", category="plane")])
+    live.game.savepath = str(tmp_path / "live.retribution")
+    assert persistency.save_game(live.game)
+    game = persistency.load_game(live.game.savepath)
+    assert game is not None
+    Migrator(game, is_liberation=False)
+    apply_entries(game, [log(2, "crash", "LIVE 1-1", category="plane")])
+    # The killer is not a loss; only its victim.
+    apply_entries(game, [log(3, "kill", "LIVE 1-2", "LIVE 1-1")])
+
+    [flight] = [f for f in ato_flights(game, Player.BLUE) if f.id == live.flight.id]
+    squadron = flight.squadron
+    assert squadron.owned_aircraft == owned - 1
+    assert squadron.destroyed_aircraft == destroyed + 1
+    first, *rest = [p for p in flight.roster.iter_pilots() if p is not None]
+    assert first.status is PilotStatus.Dead
+    assert [p.status for p in rest] == [PilotStatus.Active]
+    assert [p for p in squadron.current_roster if not p.alive] == [first]
+
+
+def test_flight_finished_when_rest_landed(live: Live) -> None:
+    game, flight = live.game, live.flight
+    squadron = flight.squadron
+    package = flight.package
+
+    batch = apply_entries(
+        game,
+        [
+            log(1, "dead", "LIVE 1-1", category="plane"),
+            log(2, "land", "LIVE 1-2", category="plane", place="Ramat David"),
+        ],
+    )
+
+    assert batch.finished == [flight]
+    assert squadron in batch.squadrons
+    assert flight in package.flights, "returned, not removed"
+    finish_flight(game, flight)
+    settle(game, batch)
+    assert flight not in ato_flights(game, Player.BLUE)
+    assert package not in game.blue.ato.packages
+    held = sum(
+        f.count for f in ato_flights(game, Player.BLUE) if f.squadron is squadron
+    )
+    assert squadron.untasked_aircraft == squadron.owned_aircraft - held
+
+
+def test_parked_aircraft_destroyed(live: Live) -> None:
+    game = live.game
+    name, parked = next(
+        (n, u)
+        for n, u in game.live.name_map.aircraft.items()
+        if u.pilot is None and u.flight.squadron.player.is_red
+    )
+    squadron = parked.flight.squadron
+    owned = squadron.owned_aircraft
+    pilots = list(squadron.available_pilots)
+
+    batch = apply_entries(game, [log(1, "dead", name, category="plane")])
+    settle(game, batch)
+
+    assert squadron.owned_aircraft == owned - 1
+    assert squadron.available_pilots == pilots
+    assert all(p.alive for p in squadron.current_roster)
+    assert batch.finished == []
+
+
+def isolated_circle(game: Game) -> ZoneShape:
+    zones = [
+        cast(ZoneShape, m.trigger_zone)
+        for m in game.live.name_map.scenery_objects.values()
+    ]
+    return next(
+        z
+        for z in zones
+        if z.corners is None
+        and all(o is z or math.hypot(o.x - z.x, o.y - z.y) > 1000 for o in zones)
+    )
+
+
+def test_scenery_death_by_position(live: Live) -> None:
+    game = live.game
+    zone = isolated_circle(game)
+    scenery = game.live.name_map.scenery_objects[zone.name].ground_unit
+    alive = scenery.alive
+
+    batch = apply_entries(
+        game,
+        [
+            log(
+                1,
+                "dead",
+                "123456",
+                category="scenery",
+                pos=LogPos(zone.x + 10, zone.y, 0),
+            )
+        ],
+    )
+
+    assert (alive, scenery.alive) == (True, False)
+    assert batch.dead == [zone.name]
+
+
+def plan_red(game: Game, squadron: Squadron) -> Flight:
+    package = Package(squadron.location, game.db.flights, auto_asap=True)
+    flight = Flight(package, squadron, 1, FlightType.BARCAP, StartType.COLD, None)
+    package.add_flight(flight)
+    flight.recreate_flight_plan()
+    package.set_tot_asap(game.conditions.start_time)
+    game.red.ato.add_package(package)
+    return flight
+
+
+def test_capture_applied(live: Live) -> None:
+    game = live.game
+    cp, squadron = next(
+        (cp, s)
+        for cp in game.theater.controlpoints
+        if isinstance(cp, Airfield) and cp.captured.is_red
+        for s in cp.squadrons
+        if s.untasked_aircraft > 0
+    )
+    stranded = plan_red(game, squadron)
+
+    batch = apply_entries(
+        game, [log(1, "base_captured", place=cp.airport.name, side=2)]
+    )
+
+    assert cp.captured is Player.BLUE
+    assert batch.captured == [cp]
+    assert batch.threat_changed
+    assert batch.stranded == [stranded]
+    assert stranded.squadron in batch.squadrons
+    assert cp in batch.events.updated_control_points
+
+
+def test_unknown_names_change_nothing(
+    live: Live, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review Focus 3: names the map does not know are ignored, quietly."""
+    game = live.game
+    owned = [s.owned_aircraft for s in squadrons(game)]
+    alive = [u.alive for _, u in tgo_units(game)]
+    unknown = [
+        log(1, "dead", "dcs-companion-mission|x", category="static"),
+        log(2, "kill", "Enemy 1-1", "CTLD crate 1"),
+        log(3, "vanished", "Stranger 1-1", category="plane"),
+        log(4, "dead", "CTLD crate 1", category="static", pos=LogPos(1000, 2000, 0)),
+    ]
+
+    with caplog.at_level(logging.DEBUG):
+        batch = apply_entries(game, unknown)
+
+    assert [s.owned_aircraft for s in squadrons(game)] == owned
+    assert [u.alive for _, u in tgo_units(game)] == alive
+    assert batch.dead == [] and game.live.dead == set()
+    assert not batch.squadrons and not batch.threat_changed
+    for name in ("dcs-companion-mission|x", "CTLD crate 1", "Stranger 1-1"):
+        assert name not in caplog.text
+
+
+def test_vanished_after_landing_is_not_a_loss(live: Live) -> None:
+    """Review Focus 4: a parked aircraft DCS removed, or a player's, is not lost."""
+    game = live.game
+    squadron = live.flight.squadron
+    owned = squadron.owned_aircraft
+
+    apply_entries(game, [log(1, "land", "LIVE 1-2", category="plane")])
+    apply_entries(game, [log(2, "vanished", "LIVE 1-2", category="plane")])
+    assert squadron.owned_aircraft == owned
+
+    apply_entries(
+        game, [log(3, "vanished", "LIVE 1-1", category="plane", player="Uzi")]
+    )
+    assert squadron.owned_aircraft == owned
+
+    batch = apply_entries(game, [log(4, "vanished", "LIVE 1-1", category="plane")])
+    assert squadron.owned_aircraft == owned - 1
+    assert batch.dead == ["LIVE 1-1"]
+
+
+def test_uncapturable_captures_skipped(saved_games: Path) -> None:
+    """Review Focus 5's capture rules: carriers, LHAs, off-map spawns, a base
+    already the side's and a place Retribution does not know are skipped."""
+    game = new_game(
+        dynamic=True,
+        squadrons_start_full=True,
+        campaign_file=Path("resources/campaigns/black_sea.yaml"),
+    )
+    points = game.theater.controlpoints
+    carrier = next(
+        cp for cp in points if isinstance(cp, Carrier) and cp.captured.is_red
+    )
+    off_map = next(
+        cp for cp in points if isinstance(cp, OffMapSpawn) and cp.captured.is_red
+    )
+    lha = next(cp for cp in points if isinstance(cp, Lha) and cp.captured.is_blue)
+    blue = next(cp for cp in points if isinstance(cp, Airfield) and cp.captured.is_blue)
+    owners = [cp.captured for cp in points]
+
+    batch = apply_entries(
+        game,
+        [
+            log(1, "base_captured", place=carrier.name, side=2),
+            log(2, "base_captured", place=off_map.name, side=2),
+            log(3, "base_captured", place=lha.name, side=1),
+            log(4, "base_captured", place=blue.airport.name, side=2),
+            log(5, "base_captured", place="Nowhere", side=2),
+        ],
+    )
+
+    assert batch.captured == []
+    assert [cp.captured for cp in points] == owners
+    assert not batch.threat_changed
+
+
+def test_wreck_recorded(live: Live) -> None:
+    game = live.game
+    (sam, _), (other, _) = tgo_units(game)[:2]
+    before = len(game.get_destroyed_units())
+
+    apply_entries(
+        game,
+        [
+            log(
+                1,
+                "dead",
+                sam,
+                category="ground",
+                type="SA-11 Buk LN 9A310M1",
+                pos=LogPos(1000, 2000, 5),
+            ),
+            log(
+                2,
+                "dead",
+                other,
+                category="ground",
+                type="F-16C_CRASH",
+                pos=LogPos(1000, 2000, 5),
+            ),
+        ],
+    )
+
+    wrecks = game.get_destroyed_units()[before:]
+    assert wrecks == [
+        {
+            "x": 1000.0,
+            "y": 5.0,
+            "z": 2000.0,
+            "type": "SA-11 Buk LN 9A310M1",
+            "orientation": 0.0,
+        }
+    ]

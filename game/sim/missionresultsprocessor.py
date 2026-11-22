@@ -55,6 +55,23 @@ class MissionResultsProcessor:
             with logged_duration("record_carcasses"):
                 self.record_carcasses(debriefing)
 
+    def commit_live(self, debriefing: Debriefing, events: GameUpdateEvents) -> None:
+        """A dynamic campaign's losses, applied while its mission runs.
+
+        The turn's loss steps in `commit`'s order, with captures but without
+        their redeployment; no pilot experience, runway damage or front-line
+        battle impact, which belong to a turn's end.
+        """
+        self.commit_air_losses(debriefing)
+        self.commit_front_line_losses(debriefing)
+        self.commit_motorpool_losses(debriefing)
+        self.commit_convoy_losses(debriefing)
+        self.commit_cargo_ship_losses(debriefing)
+        self.commit_airlift_losses(debriefing)
+        self.commit_ground_losses(debriefing, events)
+        self.capture_bases(debriefing, events)
+        self.record_carcasses(debriefing)
+
     def commit_air_losses(self, debriefing: Debriefing) -> None:
         for loss in debriefing.air_losses.losses:
             if loss.pilot is not None and (
@@ -178,6 +195,12 @@ class MissionResultsProcessor:
             damaged_runway.damage_runway()
 
     def commit_captures(self, debriefing: Debriefing, events: GameUpdateEvents) -> None:
+        self.capture_bases(debriefing, events)
+        for captured in debriefing.base_captures:
+            logging.info(f"Will run redeploy for {captured.control_point}")
+            self.redeploy_units(captured.control_point)
+
+    def capture_bases(self, debriefing: Debriefing, events: GameUpdateEvents) -> None:
         for captured in debriefing.base_captures:
             try:
                 if captured.captured_by_player.is_blue:
@@ -196,10 +219,6 @@ class MissionResultsProcessor:
                 )
             except Exception:
                 logging.exception(f"Could not process base capture {captured}")
-
-        for captured in debriefing.base_captures:
-            logging.info(f"Will run redeploy for {captured.control_point}")
-            self.redeploy_units(captured.control_point)
 
     def record_carcasses(self, debriefing: Debriefing) -> None:
         for destroyed_unit in debriefing.state_data.destroyed_statics:
