@@ -1,3 +1,5 @@
+from typing import Optional
+
 from PySide6 import QtCore, QtGui
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
@@ -6,6 +8,7 @@ from PySide6.QtWidgets import (
 )
 
 from game.weather.conditions import Conditions
+from qt_ui.companionlinkcontroller import CompanionLinkController
 from qt_ui.simcontroller import SimController
 from qt_ui.widgets.QConditionsDialog import QConditionsDialog
 from qt_ui.widgets.conditions.QTimeTurnWidget import QTimeTurnWidget
@@ -17,7 +20,11 @@ class QConditionsWidget(QFrame):
     UI Component to display Turn Number, Day Time & Hour and weather combined.
     """
 
-    def __init__(self, sim_controller: SimController) -> None:
+    def __init__(
+        self,
+        sim_controller: SimController,
+        companion_link: Optional[CompanionLinkController] = None,
+    ) -> None:
         super(QConditionsWidget, self).__init__()
         self.setProperty("style", "QConditionsWidget")
         self.setCursor(QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
@@ -28,7 +35,7 @@ class QConditionsWidget(QFrame):
         self.layout.setVerticalSpacing(0)
         self.setLayout(self.layout)
 
-        self.time_turn_widget = QTimeTurnWidget(sim_controller)
+        self.time_turn_widget = QTimeTurnWidget(sim_controller, companion_link)
         self.time_turn_widget.setStyleSheet("QGroupBox { margin-right: 0px; }")
         self.layout.addWidget(self.time_turn_widget, 0, 0)
 
