@@ -82,6 +82,8 @@ class Flight(
         self.start_type = start_type
         self.custom_name = custom_name
         self.group_id: int = 0
+        # A dynamic campaign's flight once it is spawned in the live mission.
+        self.launched = False
 
         self.frequency = frequency
         if self.unit_type.dcs_unit_type.tacan:
@@ -170,6 +172,8 @@ class Flight(
         state["state"] = Uninitialized(self, state["squadron"].settings)
         if "use_same_loadout_for_all_members" not in state:
             state["use_same_loadout_for_all_members"] = True
+        if "launched" not in state:
+            state["launched"] = False
         self.__dict__.update(state)
         if isinstance(self.roster, FlightRoster):
             self.roster = FlightMembers.from_roster(self, self.roster)

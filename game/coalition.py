@@ -177,8 +177,11 @@ class Coalition:
         for `Game.initialize_turn`.
         """
         # Needs to happen *before* planning transfers so we don't cancel them.
-        self.ato.clear()
-        self.air_wing.reset()
+        # A dynamic campaign keeps its ATO: hand-planned and launched flights and
+        # the aircraft they claim stay across the mid-turn re-initializations.
+        if not self.game.dynamic_campaign:
+            self.ato.clear()
+            self.air_wing.reset()
         self.refund_outstanding_orders()
         self.procurement_requests.clear()
 
