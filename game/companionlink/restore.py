@@ -17,7 +17,8 @@ marker:
    units, ships, convoys and cargo ships stand where the tick saw them, by
    their names in the name map; a convoy or cargo ship rejoins its route at
    the point nearest to it. A unit the game has alive that the tick does not
-   stays where it is generated; the dead are not generated.
+   stays where it is generated; the dead are not generated. It is written
+   beside the path and moved onto it once whole.
 5. Only once the file is written: the finished flights leave the ATO, the
    launched-again ones are not launched any more, the squadrons hold what the
    ATO holds, the new name map is kept, the campaign's time is the start, and
@@ -30,7 +31,9 @@ marker:
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -249,14 +252,21 @@ def write_restore(game: Game, path: Path) -> RestoreResult:
     record = game.live
     marker, written_map = record.marker, record.written_map
     planners = game.ground_planners
+    # Written beside `path` and moved onto it whole: a failed write leaves the
+    # mission written before as it was.
+    temporary = path.with_name(path.name + ".tmp")
     try:
         game.ground_planners = _plan_ground_war(game)
         record.new_marker()
-        unit_map = MissionGenerator(game, start, restore=placement).generate_miz(path)
+        generator = MissionGenerator(game, start, restore=placement)
+        unit_map = generator.generate_miz(temporary)
         name_map = LiveUnitMap.from_generation(unit_map, game)
+        os.replace(temporary, path)
     except BaseException:
         record.marker, record.written_map = marker, written_map
         game.ground_planners = planners
+        with contextlib.suppress(OSError):
+            temporary.unlink(missing_ok=True)
         raise
 
     for flight in launched.finished:

@@ -630,6 +630,28 @@ def test_failed_restore_changes_nothing(
     assert own.ground_planners is planners
 
 
+def test_failed_write_keeps_the_previous_mission(
+    own: Game, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write failing half-way leaves the mission written before as it was,
+    and no temporary file."""
+    path = tmp_path / "retribution_dynamic.miz"
+    path.write_bytes(b"the previous mission")
+    marker = own.live.marker
+
+    def half_written(mission: Mission, filename: Any = None) -> None:
+        Path(filename).write_bytes(b"half a mission")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Mission, "save", half_written)
+    with pytest.raises(OSError, match="disk full"):
+        write_restore(own, path)
+
+    assert path.read_bytes() == b"the previous mission"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [path.name]
+    assert own.live.marker == marker
+
+
 def test_replaced_mission_is_not_followed(
     own: Game, start_miz: Path, tmp_path: Path
 ) -> None:
@@ -660,6 +682,32 @@ def test_replaced_mission_is_not_followed(
     assert record.current_verdict is MissionVerdict.OWN, "followed"
     assert record.name_map is record.written_map
     assert record.keep(restored)
+
+
+def test_restored_missions_tick_waits_for_its_snapshot(
+    own: Game, tmp_path: Path
+) -> None:
+    """The tick and the name map belong to the same mission: once the
+    restored mission is followed, the old mission's tick is gone until the
+    restored one gives a snapshot that can be kept."""
+    record = own.live
+    old_tick = record.tick
+    assert old_tick is not None
+
+    write_restore(own, tmp_path / "retribution_dynamic.miz")
+    assert record.tick is old_tick, "kept until the restored mission is followed"
+
+    untimed = taken(envelope(own, "b2", 1, timed=False))
+    assert record.decide(untimed) is MissionVerdict.OWN
+    assert record.name_map is record.written_map
+    assert not record.keep(untimed)
+    assert own.live.tick is None
+
+    timed = taken(envelope(own, "b2", 2))
+    assert record.decide(timed) is MissionVerdict.OWN
+    assert record.keep(timed)
+    assert record.tick is not None
+    assert (record.tick.boot, record.tick.minute) == ("b2", 2)
 
 
 def test_restore_twice_writes_the_same_war(own: Game, tmp_path: Path) -> None:

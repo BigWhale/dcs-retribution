@@ -164,6 +164,9 @@ class LiveRecord:
                 self.map_marker = uuid
                 self.dead.clear()
                 self.landed.clear()
+                # The old map's tick goes with it: the new mission's first
+                # snapshot that can be kept is the tick again.
+                self.tick = None
         else:
             verdict = MissionVerdict.FOREIGN
             log.info(
@@ -220,13 +223,18 @@ class LiveRecord:
         """The link is lost or stale: no mission is current. Verdicts stay."""
         self.current = None
 
+    def verdict_of(self, mission: tuple[str, int]) -> Optional[MissionVerdict]:
+        """The verdict on the mission (boot, session); None when it is not
+        decided (or long forgotten)."""
+        known = self.verdicts.get(mission)
+        return known[0] if known is not None else None
+
     @property
     def current_verdict(self) -> Optional[MissionVerdict]:
         """The current mission's verdict; None when there is none."""
         if self.current is None:
             return None
-        known = self.verdicts.get(self.current)
-        return known[0] if known is not None else None
+        return self.verdict_of(self.current)
 
     @property
     def following_own_mission(self) -> bool:

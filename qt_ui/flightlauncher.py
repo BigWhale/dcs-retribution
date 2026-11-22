@@ -14,9 +14,11 @@ the running mission is not the campaign's own
 (`game.live.following_own_mission`), and a spawn confirmed while the current
 mission is another's (decided foreign) leaves its flight not launched
 (`launch_failed`, not failed): it launches again once the campaign's mission
-is followed. A spawn confirmed while the link is merely lost or stale is
-launched: the mission may still be the campaign's, and launching it again
-could put a second group in it.
+is followed. So does a spawn confirmed after the mission it was sent into
+stopped being the campaign's (a restore retired it), even while the link is
+lost or stale. A spawn confirmed while the link is merely lost or stale, in a
+mission still the campaign's, is launched: the mission may still be running,
+and launching it again could put a second group in it.
 
 A spawn the companion has accepted but not yet confirmed keeps its flight
 busy (not due, not editable, no Launch) while the worker follows it, up to
@@ -175,6 +177,8 @@ class FlightLauncher(QObject):
         self._failed: set[Flight] = set()
         # The group name each flight on its way was sent as.
         self._sent_as: dict[Flight, str] = {}
+        # The mission (boot, session) each flight on its way was sent into.
+        self._sent_into: dict[Flight, tuple[str, int]] = {}
         # The mission the ids and names below were handed out in.
         self._mission: Optional[tuple[str, int]] = None
         self._ids = IdAllocator()
@@ -215,6 +219,7 @@ class FlightLauncher(QObject):
         self._in_progress.clear()
         self._failed.clear()
         self._sent_as.clear()
+        self._sent_into.clear()
         self._forget_mission()
         if game is not None and game.dynamic_campaign:
             self._timer.start()
@@ -338,6 +343,7 @@ class FlightLauncher(QObject):
             model_time,
         )
         self._sent_as[flight] = request.name
+        self._sent_into[flight] = mission
         game.live.name_map.add_launched(flight, unit_names(request))
         worker = threading.Thread(
             target=self._send,
@@ -476,10 +482,16 @@ class FlightLauncher(QObject):
                 self._fail(flight, f"{flight} was not launched: {error}")
             return
         game = self._game
-        if game is not None and game.live.current_verdict is MissionVerdict.FOREIGN:
-            # Not the campaign's mission: the flight launches again when it
-            # is. Its names, mapped at send, are replaced by that launch. Not
-            # failed, so it is due again; the signal ends the launch on screen.
+        into = self._sent_into.pop(flight, None)
+        if game is not None and MissionVerdict.FOREIGN in (
+            game.live.current_verdict,
+            game.live.verdict_of(into) if into is not None else None,
+        ):
+            # Not the campaign's mission, or the one it was sent into is no
+            # longer the campaign's (retired by a restore): the flight launches
+            # again when the campaign's is followed. Its names, mapped at send,
+            # are replaced by that launch. Not failed, so it is due again; the
+            # signal ends the launch on screen.
             self._end_launch(flight)
             self._sent_as.pop(flight, None)
             message = (
@@ -498,6 +510,7 @@ class FlightLauncher(QObject):
     def _fail(self, flight: Flight, message: str) -> None:
         self._end_launch(flight)
         self._sent_as.pop(flight, None)
+        self._sent_into.pop(flight, None)
         self._failed.add(flight)
         log.warning("Launch failed: %s", message)
         self.launch_failed.emit(flight, message)

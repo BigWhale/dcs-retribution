@@ -1011,3 +1011,79 @@ def test_restore_failure_shown(
     assert following(game) and not autosave.exists()
     assert panel.companion_status.text() == status
     assert len(w.live_maps()) == maps
+
+
+def test_spawn_confirmed_into_restored_away_mission(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[..., Window],
+    game: Game,
+    commands: FakeCommands,
+    boxes: Boxes,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A spawn sent into the campaign's mission, confirmed after a restore
+    retired it while the link was stale, is refused: its flight launches
+    again into the restored mission."""
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(companionlinkcontroller, "STALE_S", 1.0)
+    monkeypatch.setattr(companionlinkcontroller, "STALE_CHECK_MS", 50)
+    monkeypatch.setattr(
+        liberation_install, "companion_command_address", lambda: commands.address
+    )
+    monkeypatch.setattr(
+        liberation_install, "companion_command_token", lambda: COMMAND_TOKEN
+    )
+    commands.statuses = ["waiting"]  # accepted, not confirmed yet
+    flight = plan_by_hand(game, 2)
+    start = flight.flight_plan.startup_time()  # due from the first snapshot
+    persistency.mission_path_for("retribution_dynamic.miz").unlink(missing_ok=True)
+
+    gate = threading.Event()
+    # The restored mission's snapshot carries the marker the restore makes.
+    script: list[Item] = [event("state", state(game, 1, start=start)), gate, ""]
+    w = window(serve(script))
+    panel = w.top_panel()
+    launcher = FlightLauncher(w.link)
+    launcher.confirm_warn_s = launcher.confirm_cap_s = 30.0
+    launcher.confirm_poll_s = 0.05
+    ended: list[tuple[Flight, str]] = []
+    launcher.launch_failed.connect(lambda f, message: ended.append((f, message)))
+    launcher.set_game(game)
+    try:
+        w.wait_for(lambda: following(game) and launcher.receiving)
+        launcher.launch_now(flight)
+        w.wait_for(lambda: len(commands.requests) == 1)
+        w.wait_for(
+            lambda: w.link.status_text()
+            == "Companion: waiting for a mission on the server"
+        )
+        assert launcher.is_busy(flight)
+
+        panel.restore_button.click()
+        assert [b[1] for b in boxes.shown] == ["Mission restored"]
+        with commands.lock:
+            commands.statuses = ["spawned"]
+        w.wait_for(lambda: not launcher.is_busy(flight))
+
+        assert flight.launched is False
+        assert flight.live_group_name is None
+        said = (
+            f"{flight} spawned after the campaign's mission stopped being "
+            "followed; it launches again"
+        )
+        assert f"Launch: {said}" in [r.getMessage() for r in caplog.records]
+        assert ended == [(flight, said)]
+
+        with commands.lock:
+            commands.statuses = ["waiting"]
+        script[2] = event("state", state(game, 1, boot="b2", start=start))
+        gate.set()
+        w.wait_for(lambda: len(commands.requests) == 2)
+        names = [u["name"] for u in commands.requests[1][0]["group"]["units"].values()]
+        assert game.live.name_map.flight_units(flight) == names
+        with commands.lock:
+            commands.statuses = ["spawned"]
+        w.wait_for(lambda: flight.launched)
+    finally:
+        launcher.stop()
