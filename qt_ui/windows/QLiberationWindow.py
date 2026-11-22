@@ -32,6 +32,7 @@ from game.theater.controlpoint import motorpools_inside_capture_zone
 from qt_ui import liberation_install
 from qt_ui.companionlinkcontroller import CompanionLinkController
 from qt_ui.dialogs import Dialog
+from qt_ui.flightlauncher import FlightLauncher
 from qt_ui.models import GameModel
 from qt_ui.simcontroller import SimController
 from qt_ui.uiconstants import URLS
@@ -87,7 +88,9 @@ class QLiberationWindow(QMainWindow):
         )
         Dialog.set_game(self.game_model)
         self.companion_link = CompanionLinkController(self)
-        self.ato_panel = QAirTaskingOrderPanel(self.game_model)
+        self.flight_launcher = FlightLauncher(self.companion_link, self)
+        self.flight_launcher.launch_failed.connect(self.on_launch_failed)
+        self.ato_panel = QAirTaskingOrderPanel(self.game_model, self.flight_launcher)
         self.info_panel = QInfoPanel(self.game)
         self.liberation_map = QLiberationMap(
             self.game_model, ui_flags.dev_ui_webserver, self
@@ -502,6 +505,7 @@ class QLiberationWindow(QMainWindow):
             self.game_model.set(self.game)
             self.game_model.init_comms_registry()
             self.companion_link.set_game(game)
+            self.flight_launcher.set_game(game)
         except AttributeError:
             logging.exception("Incompatible save game")
             QMessageBox.critical(
@@ -655,6 +659,19 @@ class QLiberationWindow(QMainWindow):
     def on_select_flight(self, flight: Flight) -> None:
         self.ato_panel.select_flight_on_map(flight)
 
+    def on_launch_failed(self, flight: Flight, message: str) -> None:
+        """Shows a failed launch once, without blocking the launch check."""
+        box = QMessageBox(
+            QMessageBox.Icon.Warning,
+            "Flight not launched",
+            message,
+            QMessageBox.StandardButton.Ok,
+            self,
+        )
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.setModal(False)
+        box.show()
+
     def _qsettings(self) -> QSettings:
         return QSettings("DCS Retribution", "Qt UI")
 
@@ -681,6 +698,7 @@ class QLiberationWindow(QMainWindow):
         if result in [QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No]:
             if result == QMessageBox.StandardButton.Yes:
                 self.saveGame()
+            self.flight_launcher.stop()
             self.companion_link.stop()
             self._save_window_geometry()
             super().closeEvent(event)

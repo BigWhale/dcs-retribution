@@ -64,6 +64,13 @@ class QLiberationPreferences(QFrame):
         self.edit_companion_token = QLineEdit(self.companion_token)
         self.edit_companion_token.setEchoMode(QLineEdit.EchoMode.Password)
         self.edit_companion_token.setMinimumWidth(300)
+        self.companion_command_address = liberation_install.companion_command_address()
+        self.edit_companion_command_address = QLineEdit(self.companion_command_address)
+        self.edit_companion_command_address.setMinimumWidth(300)
+        self.companion_command_token = liberation_install.companion_command_token()
+        self.edit_companion_command_token = QLineEdit(self.companion_command_token)
+        self.edit_companion_command_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.edit_companion_command_token.setMinimumWidth(300)
 
         self.initUi()
 
@@ -145,6 +152,30 @@ class QLiberationPreferences(QFrame):
         layout.addWidget(
             self.edit_companion_token, 11, 0, alignment=Qt.AlignmentFlag.AlignRight
         )
+        layout.addWidget(
+            QLabel("<strong>DCS Companion command address</strong>"),
+            12,
+            0,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+        )
+        layout.addWidget(
+            self.edit_companion_command_address,
+            13,
+            0,
+            alignment=Qt.AlignmentFlag.AlignRight,
+        )
+        layout.addWidget(
+            QLabel("<strong>DCS Companion command token</strong>"),
+            14,
+            0,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+        )
+        layout.addWidget(
+            self.edit_companion_command_token,
+            15,
+            0,
+            alignment=Qt.AlignmentFlag.AlignRight,
+        )
 
         main_layout.addLayout(layout)
         main_layout.addStretch()
@@ -175,6 +206,10 @@ class QLiberationPreferences(QFrame):
         self.port = self.port_input.value()
         self.companion_address = self.edit_companion_address.text().strip()
         self.companion_token = self.edit_companion_token.text().strip()
+        self.companion_command_address = (
+            self.edit_companion_command_address.text().strip()
+        )
+        self.companion_command_token = self.edit_companion_command_token.text().strip()
         set_theme_index(self.themeSelect.currentIndex())
 
         if not os.path.isdir(self.saved_game_dir):
@@ -238,6 +273,9 @@ class QLiberationPreferences(QFrame):
             self.port,
         )
         liberation_install.setup_companion(self.companion_address, self.companion_token)
+        liberation_install.setup_companion_commands(
+            self.companion_command_address, self.companion_command_token
+        )
         liberation_install.save_config()
         liberation_theme.save_theme_config()
         return True

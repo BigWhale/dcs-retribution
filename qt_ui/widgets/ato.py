@@ -2,7 +2,7 @@
 
 import logging
 from copy import deepcopy
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from PySide6.QtCore import (
     QItemSelectionModel,
@@ -37,6 +37,27 @@ from .QLabeledWidget import QLabeledWidget
 from ..delegates import TwoColumnRowDelegate
 from ..models import AtoModel, GameModel, NullListModel, PackageModel
 
+if TYPE_CHECKING:
+    from qt_ui.flightlauncher import FlightLauncher
+
+#: The mark of a dynamic campaign's flight that spawned in the live mission.
+IN_FLIGHT = "In Flight"
+
+
+def flight_locked(flight: Flight, launcher: Optional["FlightLauncher"]) -> bool:
+    """Whether a dynamic campaign's flight is in flight or on its way there.
+
+    Such a flight can be neither edited nor cancelled.
+    """
+    if not flight.coalition.game.dynamic_campaign:
+        return False
+    return flight.launched or (launcher is not None and launcher.is_busy(flight))
+
+
+def package_locked(package: Package, launcher: Optional["FlightLauncher"]) -> bool:
+    """Whether a package holds a flight that is in flight or on its way there."""
+    return any(flight_locked(f, launcher) for f in package.flights)
+
 
 class FlightDelegate(TwoColumnRowDelegate):
     def __init__(self, package: Package) -> None:
@@ -63,6 +84,8 @@ class FlightDelegate(TwoColumnRowDelegate):
             missing_pilots = flight.missing_pilots
             return f"Missing pilots: {flight.missing_pilots}" if missing_pilots else ""
         elif (row, column) == (2, 0):
+            if flight.launched and flight.coalition.game.dynamic_campaign:
+                return IN_FLIGHT
             return flight.state.description.title()
         return ""
 
@@ -75,11 +98,15 @@ class QFlightList(QListView):
     """List view for displaying the flights of a package."""
 
     def __init__(
-        self, game_model: GameModel, package_model: Optional[PackageModel]
+        self,
+        game_model: GameModel,
+        package_model: Optional[PackageModel],
+        launcher: Optional["FlightLauncher"] = None,
     ) -> None:
         super().__init__()
         self.game_model = game_model
         self.package_model = package_model
+        self.launcher = launcher
         self.set_package(package_model)
         if package_model is not None:
             self.setItemDelegate(FlightDelegate(package_model.package))
@@ -125,9 +152,17 @@ class QFlightList(QListView):
             return
         self.edit_flight(index)
 
+    def is_locked(self, index: QModelIndex) -> bool:
+        """Whether the flight at the index is in flight or on its way there."""
+        if not index.isValid() or self.package_model is None:
+            return False
+        return flight_locked(self.package_model.flight_at_index(index), self.launcher)
+
     def edit_flight(self, index: QModelIndex) -> None:
         from qt_ui.dialogs import Dialog
 
+        if self.is_locked(index):
+            return
         Dialog.open_edit_flight_dialog(
             self.package_model,
             self.package_model.flight_at_index(index),
@@ -150,19 +185,24 @@ class QFlightList(QListView):
         EventStream.put_nowait(GameUpdateEvents().new_flight(clone))
 
     def cancel_or_abort_flight(self, index: QModelIndex) -> None:
+        if self.is_locked(index):
+            return
         self.package_model.cancel_or_abort_flight_at_index(index)
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         index = self.indexAt(event.pos())
+        locked = self.is_locked(index)
 
         menu = QMenu("Menu")
 
         edit_action = QAction("Edit")
         edit_action.triggered.connect(lambda: self.edit_flight(index))
+        edit_action.setEnabled(not locked)
         menu.addAction(edit_action)
 
         delete_action = QAction(f"Delete")
         delete_action.triggered.connect(lambda: self.cancel_or_abort_flight(index))
+        delete_action.setEnabled(not locked)
         menu.addAction(delete_action)
 
         menu.exec_(event.globalPos())
@@ -176,11 +216,15 @@ class QFlightPanel(QGroupBox):
     """
 
     def __init__(
-        self, game_model: GameModel, package_model: Optional[PackageModel] = None
+        self,
+        game_model: GameModel,
+        package_model: Optional[PackageModel] = None,
+        launcher: Optional["FlightLauncher"] = None,
     ) -> None:
         super().__init__("Flights")
         self.game_model = game_model
         self.package_model = package_model
+        self.launcher = launcher
 
         self.vbox = QVBoxLayout()
         self.setLayout(self.vbox)
@@ -191,7 +235,7 @@ class QFlightPanel(QGroupBox):
         )
         self.vbox.addWidget(self.tip)
 
-        self.flight_list = QFlightList(game_model, package_model)
+        self.flight_list = QFlightList(game_model, package_model, launcher)
         self.vbox.addWidget(self.flight_list)
 
         self.button_row = QHBoxLayout()
@@ -211,6 +255,12 @@ class QFlightPanel(QGroupBox):
         self.delete_button.clicked.connect(self.on_cancel_flight)
         self.button_row.addWidget(self.delete_button)
 
+        # A dynamic campaign's only: launches the flight into the live mission.
+        self.launch_button = QPushButton("Launch")
+        self.launch_button.setProperty("style", "btn-primary")
+        self.launch_button.clicked.connect(self.on_launch)  # type: ignore[attr-defined]
+        self.button_row.addWidget(self.launch_button)
+
         self.selection_changed.connect(self.on_selection_changed)
         self.on_selection_changed()
 
@@ -228,14 +278,30 @@ class QFlightPanel(QGroupBox):
 
     def on_selection_changed(self) -> None:
         """Updates the status of the edit and delete buttons."""
+        self.update_buttons()
+        self.change_map_flight_selection(self.flight_list.currentIndex())
+
+    def update_buttons(self) -> None:
+        """Enables the buttons that fit the selected flight.
+
+        A dynamic campaign's flight that is in flight or on its way there can
+        be cloned but neither edited, cancelled nor launched again; Launch is
+        shown in a dynamic campaign only.
+        """
         index = self.flight_list.currentIndex()
         enabled = index.isValid()
-        self.edit_button.setEnabled(enabled)
+        locked = self.flight_list.is_locked(index)
+        self.edit_button.setEnabled(enabled and not locked)
         self.clone_button.setEnabled(enabled)
-        self.delete_button.setEnabled(enabled)
-        self.change_map_flight_selection(index)
+        self.delete_button.setEnabled(enabled and not locked)
+        game = self.game_model.game
+        dynamic = (
+            self.launcher is not None and game is not None and game.dynamic_campaign
+        )
+        self.launch_button.setVisible(dynamic)
+        self.launch_button.setEnabled(dynamic and enabled and not locked)
         delete_text = "Cancel"
-        if (flight := self.flight_list.selected_item) is not None:
+        if enabled and (flight := self.flight_list.selected_item) is not None:
             if not flight.state.cancelable:
                 delete_text = "Abort"
         self.delete_button.setText(delete_text)
@@ -270,6 +336,18 @@ class QFlightPanel(QGroupBox):
             logging.error(f"Cannot delete flight when no flight is selected.")
             return
         self.flight_list.cancel_or_abort_flight(index)
+
+    def on_launch(self) -> None:
+        """Launches the selected flight into the live mission now."""
+        index = self.flight_list.currentIndex()
+        package_model = self.package_model
+        if not index.isValid() or package_model is None or self.launcher is None:
+            logging.error(f"Cannot launch flight when no flight is selected.")
+            return
+        if self.flight_list.is_locked(index):
+            return
+        self.launcher.launch_now(package_model.flight_at_index(index))
+        self.update_buttons()
 
 
 class PackageDelegate(TwoColumnRowDelegate):
@@ -310,9 +388,15 @@ class PackageDelegate(TwoColumnRowDelegate):
 class QPackageList(QListView):
     """List view for displaying the packages of an ATO."""
 
-    def __init__(self, game_model: GameModel, model: AtoModel) -> None:
+    def __init__(
+        self,
+        game_model: GameModel,
+        model: AtoModel,
+        launcher: Optional["FlightLauncher"] = None,
+    ) -> None:
         super().__init__()
         self.ato_model = model
+        self.launcher = launcher
         self.setModel(model)
         self.setItemDelegate(PackageDelegate(game_model))
         self.setIconSize(QSize(0, 0))
@@ -350,7 +434,16 @@ class QPackageList(QListView):
             events.new_flight(f)
         EventStream.put_nowait(events)
 
+    def is_locked(self, index: QModelIndex) -> bool:
+        """Whether the package at the index holds a flight in flight or on its
+        way there."""
+        if not index.isValid():
+            return False
+        return package_locked(self.ato_model.package_at_index(index), self.launcher)
+
     def delete_package(self, index: QModelIndex) -> None:
+        if self.is_locked(index):
+            return
         self.ato_model.cancel_or_abort_package_at_index(index)
 
     def on_new_packages(self, _parent: QModelIndex, first: int, _last: int) -> None:
@@ -377,6 +470,7 @@ class QPackageList(QListView):
 
         delete_action = QAction(f"Delete")
         delete_action.triggered.connect(lambda: self.delete_package(index))
+        delete_action.setEnabled(not self.is_locked(index))
         menu.addAction(delete_action)
 
         menu.exec_(event.globalPos())
@@ -408,7 +502,12 @@ class QPackagePanel(QGroupBox):
     delete buttons for package management.
     """
 
-    def __init__(self, game_model: GameModel, ato_model: AtoModel) -> None:
+    def __init__(
+        self,
+        game_model: GameModel,
+        ato_model: AtoModel,
+        launcher: Optional["FlightLauncher"] = None,
+    ) -> None:
         super().__init__("Packages")
         self.ato_model = ato_model
         self.ato_model.layoutChanged.connect(self.on_current_changed)
@@ -423,7 +522,7 @@ class QPackagePanel(QGroupBox):
         )
         self.vbox.addWidget(self.tip)
 
-        self.package_list = QPackageList(game_model, self.ato_model)
+        self.package_list = QPackageList(game_model, self.ato_model, launcher)
         self.vbox.addWidget(self.package_list)
 
         self.button_row = QHBoxLayout()
@@ -454,10 +553,7 @@ class QPackagePanel(QGroupBox):
     def on_current_changed(self) -> None:
         """Updates the status of the edit and delete buttons."""
         index = self.package_list.currentIndex()
-        enabled = index.isValid()
-        self.edit_button.setEnabled(enabled)
-        self.clone_button.setEnabled(enabled)
-        self.delete_button.setEnabled(enabled)
+        self.enable_buttons(index.isValid())
         self.change_map_package_selection(index)
 
     def change_map_package_selection(self, index: QModelIndex) -> None:
@@ -499,9 +595,12 @@ class QPackagePanel(QGroupBox):
         self.package_list.delete_package(index)
 
     def enable_buttons(self, enabled: bool) -> None:
+        """Enables the buttons; Cancel/abort not while the selected package
+        holds a flight in flight or on its way there."""
+        locked = self.package_list.is_locked(self.package_list.currentIndex())
         self.edit_button.setEnabled(enabled)
         self.clone_button.setEnabled(enabled)
-        self.delete_button.setEnabled(enabled)
+        self.delete_button.setEnabled(enabled and not locked)
 
 
 class QAirTaskingOrderPanel(QSplitter):
@@ -512,7 +611,9 @@ class QAirTaskingOrderPanel(QSplitter):
     the selected package.
     """
 
-    def __init__(self, game_model: GameModel) -> None:
+    def __init__(
+        self, game_model: GameModel, launcher: Optional["FlightLauncher"] = None
+    ) -> None:
         super().__init__(Qt.Orientation.Vertical)
         self.game_model = game_model
         self.ato_model = game_model.ato_model
@@ -528,12 +629,30 @@ class QAirTaskingOrderPanel(QSplitter):
         self.ato_group_box.setLayout(self.red_ato_labeled)
         self.addWidget(self.ato_group_box)
 
-        self.package_panel = QPackagePanel(game_model, self.ato_model)
+        self.package_panel = QPackagePanel(game_model, self.ato_model, launcher)
         self.package_panel.current_changed.connect(self.on_package_change)
         self.addWidget(self.package_panel)
 
-        self.flight_panel = QFlightPanel(game_model)
+        self.flight_panel = QFlightPanel(game_model, launcher=launcher)
         self.addWidget(self.flight_panel)
+
+        if launcher is not None:
+            launcher.launch_started.connect(self.on_launch_changed)
+            launcher.launched.connect(self.on_launch_changed)
+            launcher.launch_failed.connect(self.on_launch_changed)
+
+    def on_launch_changed(self, *_args: object) -> None:
+        """A flight's launch began or ended: redraws the ATO and its buttons."""
+        for ato_model in (self.game_model.ato_model, self.game_model.red_ato_model):
+            ato_model.on_sim_update(GameUpdateEvents())
+        package_model = self.flight_panel.package_model
+        if package_model is not None:
+            package_model.on_sim_update(GameUpdateEvents())
+        self.flight_panel.flight_list.viewport().update()
+        self.package_panel.enable_buttons(
+            self.package_panel.package_list.currentIndex().isValid()
+        )
+        self.flight_panel.update_buttons()
 
     def select_flight_on_map(self, flight: Flight) -> None:
         """Selects the package and flight owning the given flight.

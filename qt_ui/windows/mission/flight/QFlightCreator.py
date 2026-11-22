@@ -128,7 +128,7 @@ class QFlightCreator(QDialog):
         self.start_type = QComboBox()
         for start_type in StartType:
             self.start_type.addItem(start_type.value, userData=start_type)
-        self.start_type.setCurrentText(self.game.settings.default_start_type.value)
+        self.start_type.setCurrentText(self.default_start_type().value)
         layout.addLayout(
             QLabeledWidget(
                 "Start type:",
@@ -302,12 +302,21 @@ class QFlightCreator(QDialog):
 
         if required_start_type:
             start_type = required_start_type
+        elif self.game.dynamic_campaign:
+            start_type = self.default_start_type()
         elif roster is not None and roster.player_count > 0:
             start_type = self.game.settings.default_start_type_client
         else:
             start_type = self.game.settings.default_start_type
 
         self.start_type.setCurrentText(start_type.value)
+
+    def default_start_type(self) -> StartType:
+        """In flight for a dynamic campaign, whose flights are launched into
+        the live mission as air starts; the settings' default otherwise."""
+        if self.game.dynamic_campaign:
+            return StartType.IN_FLIGHT
+        return self.game.settings.default_start_type
 
     def current_loadout(self) -> Loadout:
         loadout = self.loadout_selector.currentData()
