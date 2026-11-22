@@ -45,6 +45,7 @@ class FakeCommands:
         #: The answer to the next POST /v1/spawn, or None for 202 s-1.
         self.refuse: Optional[tuple[int, str]] = None
         #: The statuses GET /v1/spawns/s-1 gives, in turn; the last repeats.
+        #: "http:503" answers that HTTP status with an error instead.
         self.statuses: list[str] = []
         self.server: Optional[ThreadingHTTPServer] = None
         self.thread: Optional[threading.Thread] = None
@@ -89,6 +90,9 @@ class FakeCommands:
                         if len(fake.statuses) > 1
                         else fake.statuses[0]
                     )
+                if status.startswith("http:"):
+                    self.answer(int(status[5:]), {"error": "not now"})
+                    return
                 spawn: dict[str, Any] = {
                     "id": "s-1",
                     "name": "LINK 1",

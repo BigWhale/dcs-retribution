@@ -50,6 +50,9 @@ loggers:
   qt_ui.companionlinkcontroller:
     # One line per companion snapshot (each minute).
     level: INFO
+  qt_ui.flightlauncher:
+    # A few lines per flight launched into the live mission, and its failures.
+    level: INFO
   httpcore:
     # Logs every connection step at debug: eight lines per companion retry.
     level: INFO

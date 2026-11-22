@@ -11,8 +11,13 @@ a failed one waits for the user to press Launch again.
 A spawn the companion has accepted but not yet confirmed keeps its flight
 busy (not due, not editable, no Launch) while the worker follows it, up to
 `CONFIRM_CAP_S`: launching it again could put a second group in the mission.
-Only a spawn that failed, a refusal or a lost companion fails the flight, and
-a spawn still unconfirmed at the cap, with a message that it may yet appear.
+It follows through errors that may pass (no answer, 5xx, 404). Only a spawn
+the companion reports `failed` or `despawned`, or a request it refuses
+before accepting, fails the flight plainly; a spawn still unconfirmed at the
+cap, or after an error that will not pass, fails with a message that it may
+still appear in the mission.
+
+At most one flight is launched per tick: each is generated on the GUI thread.
 
 Each flight is launched at most once at a time; several flights may be on
 their way at once. The ids and names handed out belong to one mission (the
@@ -32,7 +37,9 @@ from game import Game
 from game.ato.flight import Flight
 from game.ato.package import Package
 from game.companionlink.commands import (
+    CommandError,
     CompanionCommands,
+    SpawnFailed,
     SpawnPending,
     SpawnRequest,
 )
@@ -95,8 +102,9 @@ class FlightLauncher(QObject):
     #: The launcher of the main window, for UI that cannot be handed one.
     _current: Optional[FlightLauncher] = None
 
-    # From a worker thread: (epoch, flight, spawn id, error or None).
-    _spawn_done = Signal(object, object, object, object)
+    # From a worker thread: (epoch, flight, spawn id, error or None, whether
+    # the companion holds the spawn though it was not confirmed).
+    _spawn_done = Signal(object, object, object, object, object)
 
     def __init__(
         self, link: CompanionLinkController, parent: Optional[QObject] = None
@@ -178,16 +186,17 @@ class FlightLauncher(QObject):
 
     @Slot()
     def check(self) -> None:
-        """Launches every flight that is due at the mission clock's time."""
+        """Launches the first flight that is due at the mission clock's time."""
         game = self._game
         if game is None or not game.dynamic_campaign:
             return
         receiving = self._status is LinkStatus.RECEIVING
         now = LiveStateContext.clock().now()
-        for flight in due_flights(
-            game, now, receiving, self._in_progress, self._failed
-        ):
-            self._launch(flight)
+        due = due_flights(game, now, receiving, self._in_progress, self._failed)
+        # One a tick: each is generated on the GUI thread, and many may be due
+        # at once (a reopened save). The others are due again next tick.
+        if due:
+            self._launch(due[0])
 
     def _launch(self, flight: Flight) -> None:
         game = self._game
@@ -269,45 +278,91 @@ class FlightLauncher(QObject):
     ) -> None:
         """On a worker thread: sends the spawn and follows it to `spawned`.
 
-        A spawn still waiting after `warn_s` is logged and followed on, up to
-        `cap_s` in all; the flight stays busy all that time.
+        Once the companion has accepted the spawn it holds it, so the flight
+        stays busy while the worker follows it, up to `cap_s` in all: through
+        a spawn still waiting (logged after `warn_s`) and through errors that
+        may pass (no answer, 5xx, 404, 408, 429). Only a `failed` or
+        `despawned` spawn fails it plainly; whatever else ends it unconfirmed
+        says the spawn may still appear.
         """
-        spawn_id: Optional[str] = None
-        error: Optional[str] = None
+        commands = CompanionCommands(address, token)
         try:
-            commands = CompanionCommands(address, token)
             spawn_id = commands.spawn(request)
-            asked = time.monotonic()
-            try:
-                commands.wait_spawned(spawn_id, limit=warn_s, poll=poll_s)
-            except SpawnPending as late:
+        except Exception as e:
+            self._spawn_done.emit(epoch, flight, None, _text(e), False)
+            return
+
+        asked = time.monotonic()
+        warned = False
+        last = "waiting"
+        seen: set[str] = set()
+        while True:
+            elapsed = time.monotonic() - asked
+            left = cap_s - elapsed
+            if left <= 0:
+                error = (
+                    f"spawn {spawn_id} was not confirmed within {cap_s:g} s "
+                    f"(last: {last}); it may still appear in the mission"
+                )
+                self._spawn_done.emit(epoch, flight, spawn_id, error, True)
+                return
+            if not warned and elapsed >= warn_s:
+                warned = True
                 log.warning(
-                    "Launch: %r (spawn %s) not spawned after %g s (still %s); "
+                    "Launch: %r (spawn %s) not spawned after %g s (last: %s); "
                     "following it up to %g s",
                     request.name,
                     spawn_id,
                     warn_s,
-                    late.last_status,
+                    last,
                     cap_s,
                 )
-                left = cap_s - (time.monotonic() - asked)
-                commands.wait_spawned(spawn_id, limit=max(left, 0.0), poll=poll_s)
-        except SpawnPending as e:
-            error = (
-                f"spawn {spawn_id} was not confirmed within {cap_s:g} s "
-                f"(still {e.last_status}); it may still appear in the mission"
-            )
-        except Exception as e:
-            error = _text(e)
-        self._spawn_done.emit(epoch, flight, spawn_id, error)
+            step = left if warned else min(left, warn_s - elapsed)
+            try:
+                commands.wait_spawned(spawn_id, limit=max(step, 0.0), poll=poll_s)
+            except SpawnFailed as e:
+                self._spawn_done.emit(epoch, flight, spawn_id, _text(e), False)
+                return
+            except SpawnPending as e:
+                last = f"still {e.last_status}"
+                continue
+            except CommandError as e:
+                if not _transient(e):
+                    error = (
+                        f"spawn {spawn_id} was not confirmed ({_text(e)}); "
+                        "it may still appear in the mission"
+                    )
+                    self._spawn_done.emit(epoch, flight, spawn_id, error, True)
+                    return
+                last = _text(e)
+                if last not in seen:
+                    seen.add(last)
+                    log.warning(
+                        "Launch: following spawn %s of %r: %s; trying again",
+                        spawn_id,
+                        request.name,
+                        last,
+                    )
+                time.sleep(min(poll_s, max(cap_s - (time.monotonic() - asked), 0)))
+                continue
+            except Exception as e:
+                error = (
+                    f"spawn {spawn_id} was not confirmed ({_text(e)}); "
+                    "it may still appear in the mission"
+                )
+                self._spawn_done.emit(epoch, flight, spawn_id, error, True)
+                return
+            self._spawn_done.emit(epoch, flight, spawn_id, None, False)
+            return
 
-    @Slot(object, object, object, object)
+    @Slot(object, object, object, object, object)
     def _on_spawn_done(
         self,
         epoch: int,
         flight: Flight,
         spawn_id: Optional[str],
         error: Optional[str],
+        unconfirmed: bool,
     ) -> None:
         if epoch != self._epoch:
             log.info(
@@ -317,7 +372,10 @@ class FlightLauncher(QObject):
             )
             return
         if error is not None:
-            self._fail(flight, f"{flight} was not launched: {error}")
+            if unconfirmed:
+                self._fail(flight, f"{flight} is not confirmed in flight: {error}")
+            else:
+                self._fail(flight, f"{flight} was not launched: {error}")
             return
         self._in_progress.discard(flight)
         flight.launched = True
@@ -341,6 +399,13 @@ class FlightLauncher(QObject):
         self._status = status
         if self.receiving != was:
             self.receiving_changed.emit(self.receiving)
+
+
+def _transient(e: CommandError) -> bool:
+    """Whether following a spawn may get past the error: no answer (connect
+    error, timeout), a server error, or a record the companion cannot give
+    now."""
+    return e.status is None or e.status >= 500 or e.status in (404, 408, 429)
 
 
 def _text(e: Exception) -> str:

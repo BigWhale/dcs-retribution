@@ -144,7 +144,7 @@ class CompanionCommands:
     def _record(self, spawn_id: str) -> dict[str, Any]:
         resp = self._send("GET", f"/v1/spawns/{spawn_id}")
         if resp.status_code != 200:
-            raise self._refusal(resp)
+            raise self._refusal(resp, quiet=True)
         spawn = self._json(resp).get("spawn")
         if not isinstance(spawn, dict):
             raise CommandError(resp.status_code, "the spawn answer has no spawn")
@@ -173,7 +173,10 @@ class CompanionCommands:
                 ),
             ) from None
 
-    def _refusal(self, resp: httpx.Response) -> CommandError:
+    def _refusal(self, resp: httpx.Response, quiet: bool = False) -> CommandError:
+        """The error for a refused command; logged at warning, or at debug
+        when `quiet` (a spawn's record, asked again and again while it is
+        followed: the caller logs what matters)."""
         try:
             error = resp.json().get("error")
         except (ValueError, AttributeError):
@@ -183,7 +186,12 @@ class CompanionCommands:
         if resp.status_code == 401:
             error = f"the companion refused the command token: {error}"
         error = self._clean(error)
-        log.warning("companion command refused (%d): %s", resp.status_code, error)
+        log.log(
+            logging.DEBUG if quiet else logging.WARNING,
+            "companion command refused (%d): %s",
+            resp.status_code,
+            error,
+        )
         return CommandError(resp.status_code, error)
 
     def _json(self, resp: httpx.Response) -> dict[str, Any]:
