@@ -56,6 +56,9 @@ loggers:
   qt_ui.livelosses:
     # One line per batch of live losses, and a chunk that fails to apply.
     level: INFO
+  qt_ui.dynamicautosave:
+    # One line per dynamic campaign autosave (every 10 minutes).
+    level: INFO
   httpcore:
     # Logs every connection step at debug: eight lines per companion retry.
     level: INFO

@@ -31,15 +31,20 @@ def modules(package: ModuleType) -> list[ModuleType]:
     ]
 
 
+#: Where the live campaign's code lives: the link's package, and the GUI's
+#: controller of it that other live modules build on.
+LINK_SOURCES = ("game.companionlink", "qt_ui.companionlinkcontroller")
+
+
 def uses_the_link(module: ModuleType) -> bool:
-    """Whether the module takes anything from `game.companionlink`."""
+    """Whether the module takes anything from the link or its controller."""
     for value in vars(module).values():
         source = (
             value.__name__
             if isinstance(value, ModuleType)
             else getattr(value, "__module__", None)
         )
-        if isinstance(source, str) and source.startswith("game.companionlink"):
+        if isinstance(source, str) and source.startswith(LINK_SOURCES):
             return True
     return False
 
@@ -99,6 +104,7 @@ def app_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pat
 def test_live_campaign_loggers_reach_the_log(app_logging: Path) -> None:
     assert "game.companionlink" in LOGGERS
     assert any(name.startswith("qt_ui.") for name in LOGGERS)
+    assert "qt_ui.dynamicautosave" in LOGGERS
     for name in LOGGERS:
         logger = logging.getLogger(name)
         assert logger.disabled is False, name
