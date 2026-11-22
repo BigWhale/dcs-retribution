@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -56,6 +56,9 @@ class LiveSnapshot:
     max_unit_id: int = 0
     #: Every group, unit and static name (gone statics included).
     names: frozenset[str] = frozenset()
+    #: The envelope's bytes, zlib-compressed by the link on its thread; empty
+    #: when the snapshot was not read by the link.
+    packed: bytes = field(default=b"", repr=False, compare=False)
 
     @property
     def unit_count(self) -> int:

@@ -13,6 +13,7 @@ import logging
 import socket
 import threading
 import time
+import zlib
 from datetime import datetime
 from typing import Any, Callable, Iterator, Optional
 
@@ -244,6 +245,15 @@ def test_snapshot_parsed(serve: Any, connect: Any) -> None:
     assert snap.units[-1] is combine
 
     wait_until(lambda: rec.statuses[-2:] == [LinkStatus.LINKED, LinkStatus.RECEIVING])
+
+
+def test_snapshot_packed(serve: Any, connect: Any) -> None:
+    """The envelope comes compressed with its snapshot, as the fake served it."""
+    data = tank(4)
+    fake = serve([event("state", data)])
+    _, rec = connect(fake.address)
+    wait_until(lambda: len(rec.snapshots) == 1)
+    assert zlib.decompress(rec.snapshots[0].packed) == data.encode()
 
 
 def test_reconnects_after_drop(serve: Any, connect: Any) -> None:

@@ -2,8 +2,9 @@
 
 The thread asks the companion's data port `GET /v1/hello`, then holds
 `GET /v1/stream` open (Server-Sent Events) and hands every `state` event to
-`on_snapshot` as a `LiveSnapshot`. `mission` events are logged; `events`
-events read the event log (below); any other event is ignored.
+`on_snapshot` as a `LiveSnapshot`, its envelope compressed in `packed`.
+`mission` events are logged; `events` events read the event log (below); any
+other event is ignored.
 
 With `on_events`, the link also reads the companion's event log: after each
 hello and on each `events` event of the stream it asks `GET /v1/events` from
@@ -33,6 +34,8 @@ from __future__ import annotations
 import logging
 import socket
 import threading
+import zlib
+from dataclasses import replace
 from typing import Any, Callable, Iterable, Iterator, Optional, TypeVar
 
 import httpx
@@ -324,6 +327,8 @@ class CompanionLink(threading.Thread):
             except ValueError as e:
                 self._once("bad event", f"companion state event skipped: {e}")
                 return
+            # Compressed here, never on the GUI thread: a save keeps the newest.
+            snap = replace(snap, packed=zlib.compress(raw, 6))
             log.debug(
                 "companion snapshot: minute %d, %d units, %d statics, %d bytes",
                 snap.minute,

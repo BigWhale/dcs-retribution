@@ -8,24 +8,32 @@ names the static of the uuid written last, someone else's otherwise. Only
 the campaign's own mission is followed; entries of the event log wait until
 their mission is decided, and only the accepted mission's are applied.
 
+The record keeps the newest snapshot of the campaign's own mission under the
+name map's uuid as its tick (compressed), so the tick and the name map always
+belong to the same mission; a restored mission is written from it.
+
 The record is saved with the game: the marker, the name map, the verdicts,
-the log cursor and the names already counted dead or seen landing. The
-current mission is not saved: a reloaded game follows none until a snapshot
-decides one, as after a lost link. Entries held for a mission not yet decided
-are not saved; the link reads them again from the cursor.
+the log cursor, the names already counted dead or seen landing, and the tick
+(a save from before the tick loads with none). The current mission is not
+saved: a reloaded game follows none until a snapshot decides one, as after a
+lost link. Entries held for a mission not yet decided are not saved; the link
+reads them again from the cursor.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid as uuidlib
+import zlib
+from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
 from game.companionlink.eventlog import EventBatch, LogEntry
 from game.companionlink.linkstatus import LinkStatus
 from game.companionlink.liveunitmap import LiveUnitMap
-from game.companionlink.snapshot import LiveSnapshot
+from game.companionlink.snapshot import LiveSnapshot, parse_snapshot
 
 log = logging.getLogger("game.companionlink")
 
@@ -45,6 +53,23 @@ class MissionVerdict(Enum):
 
 
 _FOLLOWED = (MissionVerdict.OWN, MissionVerdict.OWN_AGAIN)
+
+
+@dataclass(frozen=True)
+class LiveTick:
+    """The newest snapshot of the campaign's own mission, kept compressed."""
+
+    boot: str
+    session: int
+    minute: int
+    model_time: float
+    abs_time: datetime
+    #: The snapshot's envelope, zlib-compressed.
+    packed: bytes = field(repr=False)
+
+    def snapshot(self) -> LiveSnapshot:
+        """The snapshot, parsed again from its envelope."""
+        return parse_snapshot(zlib.decompress(self.packed).decode("utf-8"))
 
 
 class LiveRecord:
@@ -69,6 +94,8 @@ class LiveRecord:
         self.dead: set[str] = set()
         #: Aircraft names last seen landing.
         self.landed: set[str] = set()
+        #: The newest snapshot of the mission `name_map` belongs to.
+        self.tick: Optional[LiveTick] = None
         self._pending: list[LogEntry] = []
         self._told_no_marker = False
 
@@ -80,6 +107,7 @@ class LiveRecord:
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
+        state.setdefault("tick", None)  # a save from before the tick
         self.__dict__.update(state)
         self.current = None
         self._pending = []
@@ -145,6 +173,28 @@ class LiveRecord:
         self.verdicts[pair] = (verdict, uuid)
         self._forget_old_verdicts()
         return verdict
+
+    def keep(self, snapshot: LiveSnapshot) -> bool:
+        """Keeps the snapshot as the tick when its mission is decided the
+        campaign's own under the name map's uuid, it has its absolute time
+        and its envelope; whether it did."""
+        known = self.verdicts.get((snapshot.boot, snapshot.session))
+        if known is None:
+            return False
+        verdict, uuid = known
+        if verdict not in _FOLLOWED or uuid != self.map_marker:
+            return False
+        if snapshot.abs_time is None or not snapshot.packed:
+            return False
+        self.tick = LiveTick(
+            boot=snapshot.boot,
+            session=snapshot.session,
+            minute=snapshot.minute,
+            model_time=snapshot.model_time,
+            abs_time=snapshot.abs_time,
+            packed=snapshot.packed,
+        )
+        return True
 
     def _forget_old_verdicts(self) -> None:
         """Drops the oldest verdicts past `VERDICTS_KEPT`, never the current

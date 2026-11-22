@@ -8,9 +8,10 @@ link that has since been stopped is dropped.
 
 A dynamic campaign follows only its own mission (`game.live.decide`, by the
 mission's marker): its snapshots set the live state and the mission clock,
-the live map draws them. Another mission, a link that is not receiving, or
-no snapshot for `STALE_S` is not followed: the clock holds at its last time,
-the live map is cleared once, and the snapshot is not kept. The event log's
+the live map draws them, and the record keeps the newest as its tick. Another
+mission, a link that is not receiving, or no snapshot for `STALE_S` is not
+followed: the clock holds at its last time, the live map is cleared once, and
+the snapshot is not kept. The event log's
 entries go to `events_received` either way; `LiveLosses` decides what to
 apply.
 """
@@ -242,6 +243,7 @@ class CompanionLinkController(QObject):
             self._unfollow()
             return
         self._followed = True
+        game.live.keep(snapshot)
         LiveStateContext.set(snapshot)
         LiveStateContext.clock().update(snapshot, time.monotonic())
         self._check_mission_start(snapshot)

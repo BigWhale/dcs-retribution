@@ -234,6 +234,8 @@ def test_only_own_mission_followed(
     own = LiveStateContext.get()
     assert own is not None and own.minute == 3
     assert following(game)
+    tick = game.live.tick
+    assert tick is not None and tick.minute == 3
 
     foreign_gate.set()
     w.wait_for(lambda: "another mission" in w.link.status_text())
@@ -241,6 +243,7 @@ def test_only_own_mission_followed(
         "Companion: another mission is running; waiting for this campaign's"
     )
     assert not following(game)
+    assert game.live.tick is tick, "another mission's snapshot is not kept"
     held = LiveStateContext.get()
     assert held is not None and held.units == () and held.boot != "b2"
     [drawn, cleared] = w.live_maps()
@@ -253,6 +256,7 @@ def test_only_own_mission_followed(
     own_gate.set()
     w.wait_for(lambda: w.link.status_text() == "Companion: minute 5, 0 units")
     assert following(game)
+    assert game.live.tick is not None and game.live.tick.minute == 5
     wall = time.monotonic()
     running, later = clock.now(wall), clock.now(wall + 60.0)
     assert running is not None and later is not None
