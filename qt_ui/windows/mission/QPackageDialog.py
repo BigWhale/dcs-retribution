@@ -192,6 +192,11 @@ class QPackageDialog(QDialog):
             launcher.launch_started.connect(self.update_delete_buttons)
             launcher.launched.connect(self.update_delete_buttons)
             launcher.launch_failed.connect(self.update_delete_buttons)
+            if self.dynamic:
+                # A flight on its way locks the package's times.
+                launcher.launch_started.connect(self.on_launch_changed)
+                launcher.launched.connect(self.on_launch_changed)
+                launcher.launch_failed.connect(self.on_launch_changed)
 
     @property
     def game(self) -> Game:
@@ -215,9 +220,13 @@ class QPackageDialog(QDialog):
             return
         if self.dynamic:
             # ASAP starts the package now, once: its later flights keep their
-            # times.
-            if self.package_model.package.auto_asap:
-                start_asap(self.package_model.package, self.package_model.now())
+            # times. A package with a flight in the live mission keeps its TOT.
+            package = self.package_model.package
+            if package.auto_asap:
+                if self.package_model.locked:
+                    package.auto_asap = False
+                else:
+                    start_asap(package, self.package_model.now())
                 self.package_model.update_tot()
             return
         self.save_tot()
@@ -262,11 +271,22 @@ class QPackageDialog(QDialog):
 
         Each field's floor is the campaign's current time, or the time shown
         if that is earlier: a package already in the past is not moved until
-        the user edits it.
+        the user edits it. A package with a flight in the live mission or on
+        its way there keeps its times: the fields and ASAP are disabled. The
+        ASAP box shows the package's ASAP (an auto created package has it).
         """
         package = self.package_model.package
         now = self.package_model.now()
-        editable = not package.auto_asap and package.all_flights_waiting_for_start()
+        movable = (
+            package.all_flights_waiting_for_start() and not self.package_model.locked
+        )
+        editable = movable and not package.auto_asap
+        blocked = self.auto_asap.blockSignals(True)
+        try:
+            self.auto_asap.setChecked(package.auto_asap)
+        finally:
+            self.auto_asap.blockSignals(blocked)
+        self.auto_asap.setEnabled(movable)
         show_time(self.tot_edit, package.time_over_target, now)
         self.tot_edit.setEnabled(editable)
         start = package_start_time(package)
@@ -276,6 +296,12 @@ class QPackageDialog(QDialog):
         else:
             show_time(self.start_edit, start, now)
             self.start_edit.setEnabled(editable)
+
+    def on_launch_changed(self, flight: Flight, *_args: object) -> None:
+        """A launch of this package's flight began or ended: its times locked
+        or not (a lock ends a ticked ASAP)."""
+        if flight in self.package_model.package.flights:
+            self.package_model.update_tot()
 
     def on_start_edited(self, value: QDateTime) -> None:
         start = python_time(value)
@@ -316,8 +342,13 @@ class QPackageDialog(QDialog):
 
     def add_flight(self, flight: Flight) -> None:
         """Adds the new flight to the package."""
-        # A dynamic campaign's package keeps its Start time.
-        start = package_start_time(self.package_model.package) if self.dynamic else None
+        # A dynamic campaign's package keeps its Start time, and one with a
+        # flight in the live mission its TOT.
+        start = (
+            package_start_time(self.package_model.package)
+            if self.dynamic and not self.package_model.locked
+            else None
+        )
         self.package_model.add_flight(flight)
         try:
             flight.recreate_flight_plan()
@@ -573,6 +604,10 @@ def settle_asap(model: PackageModel, ato: AirTaskingOrder, *_args: object) -> No
     """
     package = model.package
     if not package.auto_asap or package not in ato.packages:
+        return
+    if model.locked:
+        # A flight of it is in the live mission: its TOT stays.
+        package.auto_asap = False
         return
     start_asap(package, model.now())
     QTimer.singleShot(0, lambda: model.update_tot())

@@ -52,15 +52,21 @@ def move_tot(package: Package, tot: datetime, now: datetime) -> None:
         package.time_over_target += now - start
 
 
-def change_start_type(flight: Flight, start_type: StartType, now: datetime) -> None:
+def change_start_type(
+    flight: Flight, start_type: StartType, now: datetime, locked: bool = False
+) -> None:
     """Sets the flight's start type, keeping its package's Start time.
 
     The TOT moves by the change in the package's Start time. With ASAP the TOT
-    is worked out from now instead.
+    is worked out from now instead. A `locked` package (a flight of it in the
+    live mission or on its way there) keeps its TOT: only this flight's times
+    move.
     """
     package = flight.package
     before = package_start_time(package)
     flight.start_type = start_type
+    if locked:
+        return
     if package.auto_asap:
         package.set_tot_asap(now)
         return

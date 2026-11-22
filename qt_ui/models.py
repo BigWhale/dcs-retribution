@@ -30,6 +30,7 @@ from game.squadrons.squadron import Pilot, Squadron
 from game.theater import NavalControlPoint, Player
 from game.theater.missiontarget import MissionTarget
 from game.transfers import PendingTransfers, TransferOrder
+from qt_ui.flightlauncher import package_locked
 from qt_ui.simcontroller import SimController
 from qt_ui.uiconstants import AIRCRAFT_ICONS
 
@@ -215,13 +216,21 @@ class PackageModel(QAbstractListModel):
         """Sets a dynamic campaign's flight's start type, keeping its
         package's Start time."""
         with self.game_model.sim_controller.paused_sim():
-            packageschedule.change_start_type(flight, start_type, self.now())
+            packageschedule.change_start_type(
+                flight, start_type, self.now(), locked=self.locked
+            )
             self.update_tot()
 
     @property
     def dynamic_campaign(self) -> bool:
         game = self.game_model.game
         return game is not None and game.dynamic_campaign
+
+    @property
+    def locked(self) -> bool:
+        """Whether a dynamic campaign's package holds a flight in the live
+        mission or on its way there: its TOT is fixed then."""
+        return package_locked(self.package)
 
     def now(self) -> datetime.datetime:
         """The campaign's current time: the mission clock in a dynamic
@@ -235,6 +244,10 @@ class PackageModel(QAbstractListModel):
 
     def update_tot(self) -> None:
         with self.game_model.sim_controller.paused_sim():
+            if self.package.auto_asap and self.locked:
+                # Its flights in the live mission keep their times: ASAP is
+                # done, the TOT stays.
+                self.package.auto_asap = False
             if self.package.auto_asap:
                 self.package.set_tot_asap(
                     self.game_model.sim_controller.current_time_in_sim

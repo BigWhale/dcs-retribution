@@ -180,6 +180,20 @@ def test_start_type_change_with_asap_starts_now() -> None:
     assert package_start_time(p) == now
 
 
+def test_start_type_change_in_locked_package_keeps_tot() -> None:
+    """A package with a flight in the live mission is not re-timed: only the
+    changed flight's own times move."""
+    now = at("12:00")
+    for asap in (False, True):
+        p = package(at("15:00"), StartType.COLD, StartType.WARM, auto_asap=asap)
+
+        change_start_type(p.flights[1], StartType.IN_FLIGHT, now, locked=True)
+
+        assert p.flights[1].start_type is StartType.IN_FLIGHT
+        assert p.time_over_target == at("15:00")
+        assert p.flights[1].flight_plan.startup_time() == at("14:36")
+
+
 def test_start_asap_starts_now_and_clears_asap() -> None:
     now = at("23:58")
     p = package(at("15:00"), StartType.COLD, StartType.IN_FLIGHT, auto_asap=True)
