@@ -780,3 +780,29 @@ def test_wreck_recorded(live: Live) -> None:
             "orientation": 0.0,
         }
     ]
+
+
+def test_wreck_once_per_name(live: Live) -> None:
+    """Every death leaves a wreck, the map's units or not, once per name."""
+    game = live.game
+    sam, _ = next((n, u) for n, u in tgo_units(game) if u.alive)
+    before = len(game.get_destroyed_units())
+
+    def death(seq: int, kind: str, name: str, x: float) -> LogEntry:
+        return log(
+            seq, kind, name, category="ground", type="T-72B", pos=LogPos(x, 2000, 0)
+        )
+
+    apply_entries(
+        game,
+        [
+            death(1, "dead", "Script tank 1", 1000),
+            death(2, "crash", "Script tank 1", 1100),
+            death(3, "dead", sam, 1200),
+        ],
+    )
+    apply_entries(game, [death(4, "crash", sam, 1300)])
+
+    wrecks = game.get_destroyed_units()[before:]
+    assert [w["x"] for w in wrecks] == [1000.0, 1200.0]
+    assert "Script tank 1" not in game.live.dead

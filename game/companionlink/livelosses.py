@@ -10,7 +10,9 @@ batch becomes the same name lists, debriefed against the saved name map
 
 A unit is lost once: the names counted dead are kept in `game.live.dead`, in
 this batch and every later one, across saves. Names the map does not know
-(the marker, CTLD crates, a script's units) change nothing. A launched flight
+(the marker, CTLD crates, a script's units) change nothing but the wrecks: as
+a turn's script records every dead unit, each death with a position and a
+type that is not a crash model leaves one, once per name. A launched flight
 whose every unit is dead or landed is finished, and a flight not launched
 whose base was captured is stranded; both are returned for the caller to
 remove (the GUI through its models, `finish_flight` headless), then `settle`
@@ -74,6 +76,7 @@ def apply_entries(game: Game, entries: Sequence[LogEntry]) -> LiveBatch:
     wrecks: list[dict[str, Union[float, str]]] = []
     captures: list[str] = []
     touched: list[str] = []  # aircraft dead or landed in this batch
+    unknown_dead: set[str] = set()  # names the map does not know, dead here
     for e in sorted(entries, key=lambda e: e.seq):
         if e.kind == "land":
             if e.unit is not None and e.unit.name in name_map.aircraft:
@@ -91,12 +94,19 @@ def apply_entries(game: Game, entries: Sequence[LogEntry]) -> LiveBatch:
             if lost is None:
                 continue
             name = _known_name(name_map, lost, e.pos)
-            if name is None or name in record.dead:
+            if name is None:
+                # Not the campaign's, but its wreck is recorded as a turn's
+                # script records every dead unit; once per name in the batch.
+                if lost.name in unknown_dead:
+                    continue
+                unknown_dead.add(lost.name)
+            elif name in record.dead:
                 continue
-            record.dead.add(name)
-            dead.append(name)
-            if name in name_map.aircraft:
-                touched.append(name)
+            else:
+                record.dead.add(name)
+                dead.append(name)
+                if name in name_map.aircraft:
+                    touched.append(name)
             if e.pos is not None and lost.type and not _crash_model(lost.type):
                 wrecks.append(
                     {
