@@ -19,9 +19,20 @@ still appear in the mission.
 
 At most one flight is launched per tick: each is generated on the GUI thread.
 
+A flight starts as planned when it is a plane leaving an airfield: Cold, Warm,
+Runway or In flight; anything else (a helicopter, a FOB, a ship, off-map)
+starts in the air over its departure. A Cold or Warm flight takes the spots of
+parked spare planes of its type and side first, then free spots (`plan_parking`,
+on the GUI thread: it touches the theater's pydcs airport). The worker despawns
+those spares before it asks for the spawn; a despawn that fails (other than a
+group already gone) fails the launch before anything is spawned. Without
+enough spots the flight starts in the air, with a warning in the log. The
+spots and spares are claimed (`ParkingClaims`) before the worker starts, so a
+second launch at the field within a snapshot's age takes others.
+
 Each flight is launched at most once at a time; several flights may be on
-their way at once. The ids and names handed out belong to one mission (the
-snapshot's boot and session) and start afresh with a new mission.
+their way at once. The ids, names and parking claims handed out belong to one
+mission (the snapshot's boot and session) and start afresh with a new mission.
 """
 
 from __future__ import annotations
@@ -29,19 +40,23 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Sequence
 from typing import Optional
 
+from dcs.terrain.terrain import ParkingSlot
 from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 
 from game import Game
 from game.ato.flight import Flight
 from game.ato.package import Package
+from game.ato.starttype import StartType
 from game.companionlink.commands import (
     CommandError,
     CompanionCommands,
     SpawnFailed,
     SpawnPending,
     SpawnRequest,
+    despawn_and_spawn,
 )
 from game.companionlink.flightspawn import (
     IdAllocator,
@@ -51,6 +66,9 @@ from game.companionlink.flightspawn import (
 from game.companionlink.launching import due_flights
 from game.companionlink.link import LinkStatus
 from game.companionlink.livestate import LiveStateContext
+from game.companionlink.parking import ParkingClaims, ParkingPlan, plan_parking
+from game.companionlink.snapshot import LiveSnapshot
+from game.theater.controlpoint import Airfield
 from qt_ui import liberation_install
 from qt_ui.companionlinkcontroller import CompanionLinkController
 
@@ -65,6 +83,10 @@ CONFIRM_WARN_S = 30.0
 CONFIRM_CAP_S = 300.0
 #: How often the worker asks for the spawn's status, in seconds.
 CONFIRM_POLL_S = 0.5
+#: A launch's spots are claimed until this long after the mission clock's now
+#: (one snapshot period): the clock between snapshots is a wall-clock estimate,
+#: and a snapshot taken before the spawn lands must not free them.
+CLAIM_AHEAD_S = 60.0
 
 
 def flight_locked(flight: Flight, launcher: Optional[FlightLauncher] = None) -> bool:
@@ -129,6 +151,7 @@ class FlightLauncher(QObject):
         self._mission: Optional[tuple[str, int]] = None
         self._ids = IdAllocator()
         self._sent_names: set[str] = set()
+        self._parking = ParkingClaims()
         self._timer = QTimer(self)
         self._timer.setInterval(CHECK_INTERVAL_MS)
         # (PySide6 6.4's stub lacks the signal.)
@@ -229,7 +252,14 @@ class FlightLauncher(QObject):
             self._forget_mission()
             self._mission = mission
         try:
-            table, country, category = generate_flight_table(game, flight, now)
+            start_type, plan = self._plan_start(game, flight, snapshot)
+            table, country, category = generate_flight_table(
+                game,
+                flight,
+                now,
+                start_type=start_type,
+                parking=plan.slots if plan is not None else None,
+            )
             request = prepare_spawn(
                 table,
                 country=country,
@@ -244,6 +274,18 @@ class FlightLauncher(QObject):
             self._fail(flight, f"{flight} could not be generated: {_text(e)}")
             return
 
+        despawn: list[str] = []
+        if plan is not None:
+            self._parking.claim(plan, model_time + CLAIM_AHEAD_S)
+            despawn = list(plan.despawn)
+            log.info(
+                "Launch: %s starts %s at %s on %s; despawning first: %s",
+                flight,
+                start_type.value,
+                flight.departure.name,
+                ", ".join(_slot_name(s) for s in plan.slots),
+                ", ".join(repr(n) for n in despawn) or "none",
+            )
         log.info(
             "Launch: sending %s as %r (mission time %s, model time %.0f s)",
             flight,
@@ -257,6 +299,7 @@ class FlightLauncher(QObject):
             args=(
                 self._epoch,
                 flight,
+                despawn,
                 request,
                 liberation_install.companion_command_address(),
                 liberation_install.companion_command_token(),
@@ -273,6 +316,7 @@ class FlightLauncher(QObject):
         self,
         epoch: int,
         flight: Flight,
+        despawn: Sequence[str],
         request: SpawnRequest,
         address: str,
         token: str,
@@ -280,7 +324,12 @@ class FlightLauncher(QObject):
         cap_s: float,
         poll_s: float,
     ) -> None:
-        """On a worker thread: sends the spawn and follows it to `spawned`.
+        """On a worker thread: despawns the parked spares on the flight's
+        spots (`despawn`, in order), sends the spawn and follows it to
+        `spawned`.
+
+        A despawn that fails (but for a group gone already) fails the launch
+        before the spawn is sent: a plane may still stand on the spot.
 
         Once the companion has accepted the spawn it holds it, so the flight
         stays busy while the worker follows it, up to `cap_s` in all: through
@@ -291,7 +340,7 @@ class FlightLauncher(QObject):
         """
         commands = CompanionCommands(address, token)
         try:
-            spawn_id = commands.spawn(request)
+            spawn_id = despawn_and_spawn(commands, despawn, request)
         except Exception as e:
             self._spawn_done.emit(epoch, flight, None, _text(e), False)
             return
@@ -398,6 +447,52 @@ class FlightLauncher(QObject):
         self._mission = None
         self._ids = IdAllocator()
         self._sent_names = set()
+        self._parking = ParkingClaims()
+
+    def _plan_start(
+        self, game: Game, flight: Flight, snapshot: LiveSnapshot
+    ) -> tuple[StartType, Optional[ParkingPlan]]:
+        """The start type the flight is generated with, and its spots.
+
+        A plane leaving an airfield starts as planned, anything else in the
+        air. A Cold or Warm start gets its spots from the snapshot, or starts
+        in the air if there are too few. Not claimed yet.
+        """
+        departure = flight.departure
+        if flight.unit_type.helicopter or not isinstance(departure, Airfield):
+            return StartType.IN_FLIGHT, None
+        start_type = flight.start_type
+        if start_type not in (StartType.COLD, StartType.WARM):
+            return start_type, None
+        plan = plan_parking(
+            departure.airport,
+            flight.unit_type.dcs_unit_type,
+            flight.count,
+            flight.coalition.coalition_id,
+            snapshot,
+            self._not_spares(game),
+            self._parking,
+        )
+        if plan is None:
+            log.warning(
+                "%s: no parking for %d at %s; starting in the air",
+                flight,
+                flight.count,
+                departure.name,
+            )
+            return StartType.IN_FLIGHT, None
+        return start_type, plan
+
+    def _not_spares(self, game: Game) -> set[str]:
+        """The groups never despawned for a launch: those sent into this
+        mission and every flight's live group, of both ATOs."""
+        names = set(self._sent_names)
+        for ato in (game.blue.ato, game.red.ato):
+            for package in ato.packages:
+                for f in package.flights:
+                    if f.live_group_name is not None:
+                        names.add(f.live_group_name)
+        return names
 
     @Slot(object)
     def _on_link_status(self, status: LinkStatus) -> None:
@@ -412,6 +507,11 @@ def _transient(e: CommandError) -> bool:
     error, timeout), a server error, or a record the companion cannot give
     now."""
     return e.status is None or e.status >= 500 or e.status in (404, 408, 429)
+
+
+def _slot_name(slot: ParkingSlot) -> str:
+    """The slot's name in the airfield's parking list, or its index."""
+    return slot.slot_name or f"#{slot.crossroad_idx}"
 
 
 def _text(e: Exception) -> str:
