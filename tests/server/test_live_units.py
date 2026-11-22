@@ -1,18 +1,51 @@
 import asyncio
 import threading
 from asyncio import Queue
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from dcs.terrain import PersianGulf
 
+from game import persistency
 from game.companionlink.snapshot import LiveSnapshot, LiveUnit
 from game.server.eventstream.eventstream import EventStream
 from game.server.eventstream import models as eventstream_models
 from game.server.eventstream.models import GameUpdateEventsJs
-from game.server.liveunits.models import LiveUnitJs
+from game.server.liveunits.models import LiveUnitJs, live_unit_sidc
+from game.sidc import (
+    AirEntity,
+    LandUnitEntity,
+    StandardIdentity,
+    SymbolSet,
+)
 from game.sim import GameUpdateEvents
+
+
+@pytest.fixture(autouse=True)
+def _persistency(tmp_path: Path) -> None:
+    # The aircraft type table loads data files that reach for the saved-games
+    # folder, as it does in the app; point it at a throwaway dir.
+    persistency.setup(str(tmp_path), prefer_liberation_payloads=False, port=16884)
+
+
+def _unit(category: str, type_name: str, side: int) -> LiveUnit:
+    centre = PersianGulf().map_view_default.position
+    return LiveUnit(
+        name="u",
+        group="g",
+        category=category,
+        type=type_name,
+        side=side,
+        x=centre.x,
+        y=centre.y,
+        alt=0.0,
+        heading=90.0,
+        speed=10.0,
+        in_air=category in ("plane", "helicopter"),
+        player=None,
+    )
 
 
 def test_all_for_places_units_on_the_map() -> None:
@@ -118,3 +151,43 @@ def test_put_nowait_from_another_thread_reaches_the_loop(
     assert len(arrived) == 1 and arrived[0] is events
     # After shutdown (the loop closed) a put is dropped, not raised.
     EventStream.put_nowait(GameUpdateEvents().shut_down())
+
+
+def test_sidc_affiliation_and_dimension() -> None:
+    jet = live_unit_sidc(_unit("plane", "F-16C_50", 2))
+    assert jet.standard_identity == StandardIdentity.FRIEND
+    assert jet.symbol_set == SymbolSet.AIR
+    assert jet.entity == AirEntity.FIGHTER
+
+    hind = live_unit_sidc(_unit("helicopter", "Mi-24P", 1))
+    assert hind.standard_identity == StandardIdentity.HOSTILE_FAKER
+    assert (hind.symbol_set, hind.entity) == (SymbolSet.AIR, AirEntity.ROTARY_WING)
+
+    ship = live_unit_sidc(_unit("ship", "Dry-cargo ship-1", 0))
+    assert ship.standard_identity == StandardIdentity.UNKNOWN
+    assert ship.symbol_set == SymbolSet.SEA_SURFACE
+
+    tank = live_unit_sidc(_unit("ground", "T-72B", 1))
+    assert tank.standard_identity == StandardIdentity.HOSTILE_FAKER
+    assert (tank.symbol_set, tank.entity) == (
+        SymbolSet.LAND_UNIT,
+        LandUnitEntity.ARMOR_ARMORED_MECHANIZED_SELF_PROPELLED_TRACKED,
+    )
+
+
+def test_sidc_in_json() -> None:
+    unit = _unit("plane", "F-16C_50", 2)
+    snapshot = LiveSnapshot(
+        minute=1, boot="b", session=1, model_time=60.0, units=(unit,), size=0
+    )
+    theater: Any = SimpleNamespace(terrain=PersianGulf())
+
+    [js] = LiveUnitJs.all_for(snapshot, theater)
+
+    assert len(js.sidc) == 20 and js.sidc.isdigit()
+    assert js.sidc == str(live_unit_sidc(unit))
+
+
+def test_unknown_type_is_generic() -> None:
+    sidc = live_unit_sidc(_unit("plane", "NoSuchJet", 2))
+    assert (sidc.symbol_set, sidc.entity) == (SymbolSet.AIR, AirEntity.UNSPECIFIED)
