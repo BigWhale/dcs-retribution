@@ -17,7 +17,9 @@ from game import Game, persistency
 from game.ato.flightstate import Uninitialized
 from game.ato.package import Package
 from game.ato.traveltime import TotEstimator
+from game.companionlink.liverecord import LiveTick
 from game.companionlink.liveunitmap import LiveUnitMap
+from game.companionlink.restore import restore_start, write_restore
 from game.profiling import logged_duration
 from game.settings.settings import FastForwardStopCondition
 from game.utils import meters
@@ -81,6 +83,17 @@ class QTopPanel(QFrame):
         companion_link.snapshot_received.connect(self.update_companion_status)
         companion_link.verdict_changed.connect(self.update_companion_status)
 
+        # Writes a dynamic campaign's mission again from the newest snapshot of
+        # it (the tick): shown once the campaign has begun, enabled with a tick.
+        self.restore_button = QPushButton("Restore mission")
+        self.restore_button.setProperty("style", "btn-primary")
+        # (PySide6 6.4's stub lacks the signal.)
+        self.restore_button.clicked.connect(self.restore_mission)  # type: ignore[attr-defined]
+        self.restore_button.setVisible(False)
+        self.restore_button.setEnabled(False)
+        companion_link.snapshot_received.connect(self.update_restore_button)
+        companion_link.verdict_changed.connect(self.update_restore_button)
+
         self.factionsInfos = QFactionsInfos(self.game)
 
         self.air_wing = QPushButton("Air Wing")
@@ -112,6 +125,7 @@ class QTopPanel(QFrame):
         self.proceedBoxLayout.addWidget(self.passTurnButton)
         self.proceedBoxLayout.addWidget(self.proceedButton)
         self.proceedBoxLayout.addWidget(self.companion_status)
+        self.proceedBoxLayout.addWidget(self.restore_button)
         self.proceedBox.setLayout(self.proceedBoxLayout)
 
         self.controls = [
@@ -184,10 +198,77 @@ class QTopPanel(QFrame):
                 button.setVisible(not dynamic)
         if not dynamic:
             self.companion_status.setVisible(False)
+        self.show_restore_button(game)
 
     def update_companion_status(self, _: object = None) -> None:
         self.companion_status.setText(self.companion_link.status_text())
         self.companion_status.setVisible(self.companion_link.active)
+
+    def update_restore_button(self, _: object = None) -> None:
+        self.show_restore_button(self.game)
+
+    def show_restore_button(self, game: Optional[Game]) -> None:
+        """Shown for a dynamic campaign that has begun, enabled when it keeps a
+        tick (a slice 1 save has none until its mission is followed)."""
+        begun = game is not None and game.dynamic_campaign and game.turn > 0
+        self.restore_button.setVisible(begun)
+        self.restore_button.setEnabled(
+            begun and game is not None and game.live.tick is not None
+        )
+
+    def restore_mission(self) -> None:
+        """Writes the dynamic campaign's mission again from its tick; asks
+        first while the campaign's own mission is followed."""
+        game = self.game
+        if game is None or not game.dynamic_campaign:
+            return
+        tick = game.live.tick
+        if tick is None:
+            return
+        if game.live.following_own_mission and not self.confirm_restore(tick):
+            return
+        path = persistency.mission_path_for("retribution_dynamic.miz")
+        with logged_duration("Restoring dynamic campaign"):
+            try:
+                result = write_restore(game, path)
+            except Exception as ex:
+                # A corrupt tick or an unwritable path: the game is as before.
+                logging.exception("Dynamic campaign: restoring %s failed", path)
+                QMessageBox.warning(
+                    self,
+                    "Mission not restored",
+                    f"{path.name} was not written: {ex}",
+                    QMessageBox.StandardButton.Ok,
+                )
+                return
+            GameUpdateSignal.get_instance().updateGame(game)
+            persistency.autosave(game)
+            # The mission replaced is no longer followed, at once.
+            self.companion_link.recheck()
+        QMessageBox.information(
+            self,
+            "Mission restored",
+            (
+                f"{path.name} was written, starting "
+                f"{result.start:%Y-%m-%d %H:%M}. Load it on the server."
+            ),
+            QMessageBox.StandardButton.Ok,
+        )
+
+    def confirm_restore(self, tick: LiveTick) -> bool:
+        result = QMessageBox.question(
+            self,
+            "Restore the campaign's mission?",
+            (
+                "The campaign's mission is running. The restored mission starts "
+                f"at {restore_start(tick):%H:%M}, minute {tick.minute} of the "
+                "running one. From now on only the restored mission is followed; "
+                "nothing that happens in the running one is applied."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return result == QMessageBox.StandardButton.Yes
 
     def open_air_wing(self):
         self.dialog = AirWingDialog(self.game_model, self.window())

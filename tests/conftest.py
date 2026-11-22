@@ -33,6 +33,7 @@ from game.ato.starttype import StartType
 from game.campaignloader.campaign import Campaign, DEFAULT_BUDGET
 from game.factions import FACTIONS
 from game.game import Game
+from game.migrator import Migrator
 from game.settings import Settings
 from game.sim.missionsimulation import MissionSimulation
 from game.squadrons import Squadron
@@ -110,6 +111,16 @@ def plan_by_hand(game: Game, count: int, squadron: Squadron | None = None) -> Fl
     package.set_tot_asap(game.conditions.start_time)
     squadron.coalition.ato.add_package(package)
     return flight
+
+
+def save_and_load(game: Game, path: Path) -> Game:
+    """Saves the game to `path` and loads it again, as opening a save does."""
+    game.savepath = str(path)
+    assert persistency.save_game(game)
+    loaded = persistency.load_game(game.savepath)
+    assert loaded is not None
+    Migrator(loaded, is_liberation=False)
+    return loaded
 
 
 def generate_starting_mission(game: Game, folder: Path) -> MissionSimulation:

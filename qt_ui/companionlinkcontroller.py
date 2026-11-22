@@ -13,7 +13,8 @@ mission, a link that is not receiving, or no snapshot for `STALE_S` is not
 followed: the clock holds at its last time, the live map is cleared once, and
 the snapshot is not kept. The event log's
 entries go to `events_received` either way; `LiveLosses` decides what to
-apply.
+apply. When the game's verdicts change under the link (a restore retires the
+campaign's missions), `recheck` stops following at once.
 """
 
 from __future__ import annotations
@@ -168,6 +169,16 @@ class CompanionLinkController(QObject):
         game = self._game
         verdict = game.live.current_verdict if game is not None else None
         return companion_status(self._status, self._snapshot, self._stale, verdict)
+
+    def recheck(self) -> None:
+        """The game's verdicts changed (a restore retired the campaign's
+        missions): stops following at once when the current mission is no
+        longer the campaign's own, as a stale link does, not at its next
+        snapshot."""
+        game = self._game
+        if game is not None and not game.live.following_own_mission:
+            self._unfollow()
+        self.status_changed.emit(self._status)
 
     def _forget_following(self) -> None:
         self._received_at = None

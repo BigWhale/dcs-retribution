@@ -48,14 +48,19 @@ from game.companionlink.restore import (
 from game.companionlink.snapshot import LiveSnapshot, parse_snapshot
 from game.data.units import UnitClass
 from game.game import Game
-from game.migrator import Migrator
 from game.missiongenerator import MissionGenerator
 from game.sim.missionsimulation import MissionSimulation
 from game.squadrons import Squadron
 from game.theater import Airfield, ControlPoint, Fob
 from game.theater.theatergroundobject import ShipGroundObject
 from game.transfers import TransferOrder
-from tests.conftest import generate_starting_mission, new_game, plan_by_hand, squadrons
+from tests.conftest import (
+    generate_starting_mission,
+    new_game,
+    plan_by_hand,
+    save_and_load,
+    squadrons,
+)
 
 CAMPAIGN = Path("resources/campaigns/golan_heights_lite.yaml")
 #: When the snapshots' missions started.
@@ -164,15 +169,6 @@ def tank(name: str, x: float, y: float) -> dict[str, Any]:
 def taken(data: str) -> LiveSnapshot:
     """The snapshot as the link hands it over: parsed, its envelope packed."""
     return replace(parse_snapshot(data), packed=zlib.compress(data.encode(), 6))
-
-
-def save_and_load(game: Game, path: Path) -> Game:
-    game.savepath = str(path)
-    assert persistency.save_game(game)
-    loaded = persistency.load_game(game.savepath)
-    assert loaded is not None
-    Migrator(loaded, is_liberation=False)
-    return loaded
 
 
 def test_tick_kept_only_for_the_name_maps_mission(game: Game) -> None:

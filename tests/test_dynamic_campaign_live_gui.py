@@ -24,10 +24,11 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from game import persistency  # noqa: E402
 from game.ato.flight import Flight  # noqa: E402
+from game.companionlink.launching import due_flights  # noqa: E402
 from game.companionlink.livestate import LiveStateContext  # noqa: E402
 from game.companionlink.liverecord import MARKER_PREFIX  # noqa: E402
 from game.companionlink.liveunitmap import LiveUnitMap  # noqa: E402
@@ -37,7 +38,9 @@ from game.sim import GameUpdateEvents  # noqa: E402
 from game.theater import Player  # noqa: E402
 from qt_ui import (  # noqa: E402
     companionlinkcontroller,
+    flightlauncher,
     liberation_install,
+    liberation_theme,
     livelosses,
     uiconstants,
 )
@@ -48,16 +51,22 @@ from qt_ui.flightlauncher import FlightLauncher  # noqa: E402
 from qt_ui.livelosses import LiveLosses  # noqa: E402
 from qt_ui.models import GameModel, PackageModel  # noqa: E402
 from qt_ui.simcontroller import SimController  # noqa: E402
+from qt_ui.uiflags import UiFlags  # noqa: E402
+from qt_ui.widgets.QTopPanel import QTopPanel  # noqa: E402
+from qt_ui.windows.GameUpdateSignal import GameUpdateSignal  # noqa: E402
+import qt_ui.widgets.QTopPanel as top_panel  # noqa: E402
 from tests.conftest import (  # noqa: E402
     COMMAND_TOKEN,
     TOKEN,
     FakeCommands,
     FakeCompanion,
+    Item,
     entry,
     event,
     generate_starting_mission,
     new_game,
     plan_by_hand,
+    save_and_load,
     wait_until,
 )
 
@@ -65,6 +74,8 @@ CAMPAIGN = Path("resources/campaigns/golan_heights_lite.yaml")
 DEADLINE = 5.0
 BATCH_LINE = re.compile(r"Live losses: \d+ entries, ")
 AUTOSAVE_LINE = re.compile(r"Autosave: (.+) in \d+ ms")
+#: The status while another mission runs.
+FOLLOWED_NOT = "Companion: another mission is running; waiting for this campaign's"
 
 
 @pytest.fixture(scope="module")
@@ -98,9 +109,46 @@ class Window:
         self.losses = LiveLosses(self.link)
         self.losses.set_game(self.game_model)
         self.map_events: list[GameUpdateEvents] = []
+        self.panel: Optional[QTopPanel] = None
 
     def start(self) -> None:
         self.link.set_game(self.game)
+
+    def top_panel(self) -> QTopPanel:
+        """The main window's top panel, shown the game as a loaded save is;
+        each game update reaches the window's side after the panel, as in the
+        main window (`set_game`)."""
+        liberation_theme.set_theme_index(liberation_theme.DEFAULT_THEME_INDEX)
+        uiconstants.load_icons()  # the panel's buttons
+        signal = GameUpdateSignal.get_instance() or GameUpdateSignal()
+        self.panel = QTopPanel(
+            self.game_model,
+            self.game_model.sim_controller,
+            UiFlags(dev_ui_webserver=False, show_sim_speed_controls=False),
+            self.link,
+        )
+        signal.gameupdated.connect(self.set_game)
+        signal.updateGame(self.game)
+        return self.panel
+
+    def set_game(self, game: Optional[Game]) -> None:
+        """The main window on a game update: the sim, the game model and the
+        link follow the game."""
+        if game is None:
+            return
+        self.game = game
+        self.game_model.sim_controller.set_game(game)
+        self.game_model.set(game)
+        self.link.set_game(game)
+
+    def close_panel(self) -> None:
+        if self.panel is None:
+            return
+        signal = GameUpdateSignal.get_instance()
+        signal.gameupdated.disconnect(self.panel.setGame)
+        signal.budgetupdated.disconnect(self.panel.budget_update)
+        signal.gameupdated.disconnect(self.set_game)
+        self.panel = None
 
     def pump(self) -> None:
         """Turns the Qt event loop."""
@@ -121,16 +169,18 @@ class Window:
 
 @pytest.fixture
 def window(
-    app: QApplication, game: Game, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[Callable[[FakeCompanion], Window]]:
+    app: QApplication, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Callable[..., Window]]:
+    """Opens the window on a fake companion, for `of` or the `game` fixture's
+    game."""
     made: list[Window] = []
 
-    def open_window(fake: FakeCompanion) -> Window:
+    def open_window(fake: FakeCompanion, of: Optional[Game] = None) -> Window:
         monkeypatch.setattr(
             liberation_install, "companion_address", lambda: fake.address
         )
         monkeypatch.setattr(liberation_install, "companion_token", lambda: TOKEN)
-        w = Window(app, game)
+        w = Window(app, of if of is not None else request.getfixturevalue("game"))
         monkeypatch.setattr(EventStream, "put_nowait", w.map_events.append)
         made.append(w)
         w.start()
@@ -138,6 +188,7 @@ def window(
 
     yield open_window
     for w in made:
+        w.close_panel()
         w.link.stop()
         w.pump()
     LiveStateContext.set(None)
@@ -770,3 +821,193 @@ def test_autosave_every_ten_minutes(
         assert len(autosave_lines()) == 1
     finally:
         autosave.set_game(None)
+
+
+class Boxes:
+    """`QMessageBox`'s static methods, recorded as (method, title, text); a
+    question is answered `answer`."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.shown: list[tuple[str, str, str]] = []
+        self.answer = QMessageBox.StandardButton.No
+        for method in ("question", "information", "warning", "critical"):
+            monkeypatch.setattr(QMessageBox, method, self._recorder(method))
+
+    def _recorder(self, method: str) -> Any:
+        def show(_parent: Any, title: str, text: str, *_args: Any) -> Any:
+            self.shown.append((method, title, text))
+            if method == "question":
+                return self.answer
+            return QMessageBox.StandardButton.Ok
+
+        return staticmethod(show)
+
+
+@pytest.fixture
+def boxes(monkeypatch: pytest.MonkeyPatch) -> Boxes:
+    return Boxes(monkeypatch)
+
+
+def restore_question(at: datetime, minute: int) -> tuple[str, str, str]:
+    """The confirmation of a restore while the campaign's mission is
+    followed, the restored mission starting `at`."""
+    return (
+        "question",
+        "Restore the campaign's mission?",
+        f"The campaign's mission is running. The restored mission starts at "
+        f"{at:%H:%M}, minute {minute} of the running one. From now on only the "
+        "restored mission is followed; nothing that happens in the running one "
+        "is applied.",
+    )
+
+
+def test_restore_button_states(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[..., Window],
+    saved_games: Path,
+    tmp_path: Path,
+) -> None:
+    game = new_game(dynamic=True, squadrons_start_full=True, campaign_file=CAMPAIGN)
+    gate = threading.Event()
+    # The snapshot carries the marker Begin Campaign makes: set once begun.
+    script: list[Item] = [gate, ""]
+    w = window(serve(script), game)
+    panel = w.top_panel()
+    button = panel.restore_button
+    assert button.text() == "Restore mission"
+    assert not button.isVisibleTo(panel), "before Begin Campaign"
+
+    panel.passTurnButton.click()
+    assert game.turn == 1
+    assert button.isVisibleTo(panel) and not button.isEnabled(), "no tick yet"
+
+    script[1] = event("state", state(game, 1))
+    gate.set()
+    w.wait_for(lambda: game.live.tick is not None)
+    assert button.isEnabled(), "the first own snapshot kept"
+
+    del game.live.__dict__["tick"]
+    slice_one = save_and_load(game, tmp_path / "slice1.retribution")
+    assert slice_one.live.tick is None
+    GameUpdateSignal.get_instance().updateGame(slice_one)
+    assert button.isVisibleTo(panel) and not button.isEnabled(), "a slice 1 save"
+
+
+def test_restore_while_followed(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[..., Window],
+    game: Game,
+    commands: FakeCommands,
+    boxes: Boxes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The launcher checks only when told to.
+    monkeypatch.setattr(flightlauncher, "CHECK_INTERVAL_MS", 3_600_000)
+    monkeypatch.setattr(
+        liberation_install, "companion_command_address", lambda: commands.address
+    )
+    monkeypatch.setattr(
+        liberation_install, "companion_command_token", lambda: COMMAND_TOKEN
+    )
+    flight = plan_by_hand(game, 2)
+    start = flight.flight_plan.startup_time()  # due from the first snapshot
+    restored_at = (start + timedelta(minutes=3)).replace(second=0, microsecond=0)
+    mission = persistency.mission_path_for("retribution_dynamic.miz")
+    mission.unlink(missing_ok=True)
+    autosave = persistency.dynamic_autosave_path()
+
+    w = window(serve([event("state", state(game, 3, start=start))]))
+    panel = w.top_panel()
+    launcher = FlightLauncher(w.link)
+    launcher.set_game(game)
+    try:
+        w.wait_for(
+            lambda: following(game)
+            and game.live.cursor == 0
+            and launcher.receiving
+            and panel.restore_button.isEnabled()
+        )
+        assert due_flights(
+            game, LiveStateContext.clock().now(), True, set(), set()
+        ) == [flight]
+        autosave.unlink(missing_ok=True)  # live losses saved the first cursor
+        marker = game.live.marker
+        followed_status = panel.companion_status.text()
+        assert followed_status == "Companion: minute 3, 0 units"
+        maps = len(w.live_maps())
+
+        panel.restore_button.click()
+        assert boxes.shown == [restore_question(restored_at, 3)]
+        assert not mission.exists() and not autosave.exists()
+        assert game.live.marker == marker and following(game)
+        assert panel.companion_status.text() == followed_status
+        assert len(w.live_maps()) == maps
+
+        boxes.shown.clear()
+        boxes.answer = QMessageBox.StandardButton.Yes
+        panel.restore_button.click()
+        assert boxes.shown == [
+            restore_question(restored_at, 3),
+            (
+                "information",
+                "Mission restored",
+                f"retribution_dynamic.miz was written, starting "
+                f"{restored_at:%Y-%m-%d %H:%M}. Load it on the server.",
+            ),
+        ]
+        assert mission.exists()
+        assert game.live.marker != marker
+        saved = persistency.load_game(str(autosave))
+        assert saved is not None and saved.live.marker == game.live.marker
+        # At once, not at the old mission's next snapshot.
+        assert panel.companion_status.text() == FOLLOWED_NOT
+        [cleared] = w.live_maps()[maps:]
+        assert cleared.units == () and cleared.boot == ""
+
+        launcher.check()
+        w.pump()
+        assert not launcher.launching and not flight.launched
+        assert commands.requests == []
+    finally:
+        launcher.stop()
+
+
+def test_restore_failure_shown(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[..., Window],
+    game: Game,
+    boxes: Boxes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def disk_full(_game: Game, _path: Path) -> Any:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(top_panel, "write_restore", disk_full)
+    autosave = persistency.dynamic_autosave_path()
+    w = window(serve([event("state", state(game, 3))]))
+    panel = w.top_panel()
+    w.wait_for(
+        lambda: following(game)
+        and game.live.cursor == 0
+        and panel.restore_button.isEnabled()
+    )
+    autosave.unlink(missing_ok=True)  # live losses saved the first cursor
+    marker, tick = game.live.marker, game.live.tick
+    start_time = game.conditions.start_time
+    status = panel.companion_status.text()
+    maps = len(w.live_maps())
+
+    boxes.answer = QMessageBox.StandardButton.Yes
+    panel.restore_button.click()
+    assert boxes.shown[1:] == [
+        (
+            "warning",
+            "Mission not restored",
+            "retribution_dynamic.miz was not written: disk full",
+        )
+    ]
+    assert game.live.marker == marker and game.live.tick is tick
+    assert game.conditions.start_time == start_time
+    assert following(game) and not autosave.exists()
+    assert panel.companion_status.text() == status
+    assert len(w.live_maps()) == maps
