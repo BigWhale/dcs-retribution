@@ -10,6 +10,8 @@ link that has since been stopped is dropped.
 from __future__ import annotations
 
 import logging
+import time
+from datetime import datetime, timedelta
 from typing import Optional
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
@@ -23,6 +25,9 @@ from game.sim import GameUpdateEvents
 from qt_ui import liberation_install
 
 log = logging.getLogger(__name__)
+
+#: How far the live mission's start may be from the game's before a warning.
+START_TOLERANCE_S = 60.0
 
 
 class CompanionLinkController(QObject):
@@ -41,6 +46,8 @@ class CompanionLinkController(QObject):
         self._link: Optional[CompanionLink] = None
         self._status = LinkStatus.WAITING
         self._snapshot: Optional[LiveSnapshot] = None
+        # The missions (boot, session) whose start was already warned about.
+        self._start_warned: set[tuple[str, int]] = set()
         # Queued: they are emitted on the link's thread. (PySide6 6.4's stub
         # types the connection type wrong.)
         queued = Qt.ConnectionType.QueuedConnection
@@ -94,12 +101,14 @@ class CompanionLinkController(QObject):
         self.status_changed.emit(self._status)
 
     def stop(self) -> None:
-        """Stops the link and joins its thread; clears the live state."""
+        """Stops the link and joins its thread; clears the live state and
+        resets the mission clock."""
         link = self._link
         self._link = None
         self._snapshot = None
         self._status = LinkStatus.WAITING
-        LiveStateContext.set(None)
+        self._start_warned.clear()
+        LiveStateContext.set(None)  # resets the clock too
         if link is None:
             return
         link.stop()
@@ -131,6 +140,8 @@ class CompanionLinkController(QObject):
             return
         self._snapshot = snapshot
         LiveStateContext.set(snapshot)
+        LiveStateContext.clock().update(snapshot, time.monotonic())
+        self._check_mission_start(snapshot)
         log.info(
             "Companion snapshot: minute %d, %d units, %d statics, %d bytes",
             snapshot.minute,
@@ -140,3 +151,27 @@ class CompanionLinkController(QObject):
         )
         EventStream.put_nowait(GameUpdateEvents().update_live_units(snapshot))
         self.snapshot_received.emit(snapshot)
+
+    def _check_mission_start(self, snapshot: LiveSnapshot) -> None:
+        """Warns once per mission when its start is not the game's.
+
+        The snapshot's time is the truth; the clock follows it either way.
+        """
+        if snapshot.abs_time is None or self._game is None:
+            return
+        start = snapshot.abs_time - timedelta(seconds=snapshot.model_time)
+        mission = (snapshot.boot, snapshot.session)
+        if mission in self._start_warned:
+            return
+        expected: datetime = self._game.conditions.start_time
+        off = (start - expected).total_seconds()
+        if abs(off) <= START_TOLERANCE_S:
+            return
+        self._start_warned.add(mission)
+        log.warning(
+            "Companion: the live mission started at %s, the game's start is %s "
+            "(%+.0f s); following the live mission",
+            start.isoformat(sep=" ", timespec="seconds"),
+            expected.isoformat(sep=" ", timespec="seconds"),
+            off,
+        )

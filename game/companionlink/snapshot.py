@@ -4,7 +4,9 @@ The companion serves each snapshot as one JSON envelope: `minute`, `boot`,
 `session`, `modelTime`, `takenAt` and the hook's `campaign_state` answer in
 `state` (`meta`, `groups`, `statics`, `airbases`). Only what the map needs is
 kept: every unit of every group and every static that still exists, with its
-position, motion and side.
+position, motion and side; the mission's absolute time (`meta.date` plus
+`meta.absTime`); and the ids and names the mission already uses, so a spawn can
+pick new ones.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import json
 import logging
 import math
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 log = logging.getLogger("game.companionlink")
@@ -45,6 +48,14 @@ class LiveSnapshot:
     model_time: float
     units: tuple[LiveUnit, ...]  # groups' units, then statics with exists true
     size: int  # bytes of the event's data
+    #: meta.date + meta.absTime; None when meta lacks them.
+    abs_time: Optional[datetime] = None
+    #: The highest group id in the snapshot.
+    max_group_id: int = 0
+    #: The highest unit or static id (gone statics included).
+    max_unit_id: int = 0
+    #: Every group, unit and static name (gone statics included).
+    names: frozenset[str] = frozenset()
 
     @property
     def unit_count(self) -> int:
@@ -88,6 +99,7 @@ def parse_snapshot(data: str) -> LiveSnapshot:
         if static is not None:
             units.append(static)
 
+    max_group_id, max_unit_id, names = _ids_and_names(state)
     return LiveSnapshot(
         minute=minute,
         boot=boot,
@@ -95,7 +107,63 @@ def parse_snapshot(data: str) -> LiveSnapshot:
         model_time=model_time,
         units=tuple(units),
         size=len(data.encode("utf-8")),
+        abs_time=_abs_time(state.get("meta")),
+        max_group_id=max_group_id,
+        max_unit_id=max_unit_id,
+        names=names,
     )
+
+
+def _abs_time(meta: Any) -> Optional[datetime]:
+    """meta.date plus meta.absTime; None when either is missing or bad."""
+    if not isinstance(meta, dict):
+        return None
+    seconds = _number(meta.get("absTime"))
+    date = meta.get("date")
+    if seconds is None or not isinstance(date, dict):
+        return None
+    parts: list[int] = []
+    for key in ("Year", "Month", "Day"):
+        v = date.get(key)
+        if not isinstance(v, int) or isinstance(v, bool):
+            return None
+        parts.append(v)
+    try:
+        year, month, day = parts
+        return datetime(year, month, day) + timedelta(seconds=seconds)
+    except (ValueError, OverflowError) as e:
+        log.debug("companion snapshot: bad mission time: %s", e)
+        return None
+
+
+def _ids_and_names(state: dict[str, Any]) -> tuple[int, int, frozenset[str]]:
+    """The highest group id, the highest unit or static id, and every name.
+
+    Read from the raw lists, so an object the map skips still counts.
+    """
+    max_group = 0
+    max_unit = 0
+    names: set[str] = set()
+
+    def note(obj: dict[str, Any]) -> int:
+        name = obj.get("name")
+        if isinstance(name, str):
+            names.add(name)
+        i = obj.get("id")
+        return i if isinstance(i, int) and not isinstance(i, bool) else 0
+
+    for g in _list(state, "groups"):
+        if not isinstance(g, dict):
+            continue
+        max_group = max(max_group, note(g))
+        units = g.get("units")
+        for u in units if isinstance(units, list) else []:
+            if isinstance(u, dict):
+                max_unit = max(max_unit, note(u))
+    for s in _list(state, "statics"):
+        if isinstance(s, dict):
+            max_unit = max(max_unit, note(s))
+    return max_group, max_unit, frozenset(names)
 
 
 def _envelope_int(env: dict[str, Any], key: str) -> int:

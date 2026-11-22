@@ -12,6 +12,7 @@ import logging
 import socket
 import threading
 import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Iterator, Optional, Union
 
@@ -183,6 +184,7 @@ def state(
     minute: int,
     *groups: dict[str, Any],
     statics: Optional[list[dict[str, Any]]] = None,
+    meta: Optional[dict[str, Any]] = None,
 ) -> str:
     return json.dumps(
         {
@@ -192,7 +194,11 @@ def state(
             "modelTime": 2334.662 + 60 * minute,
             "takenAt": "2026-11-21T19:40:12.345Z",
             "state": {
-                "meta": {"version": 1, "modelTime": 2334.662 + 60 * minute},
+                "meta": {
+                    "version": 1,
+                    "modelTime": 2334.662 + 60 * minute,
+                    **(meta or {}),
+                },
                 "groups": list(groups),
                 "statics": statics or [],
                 "airbases": [],
@@ -269,11 +275,15 @@ def test_snapshot_parsed(serve: Any, connect: Any) -> None:
                 alt=3048.0,
                 fuel=0.8,
                 callsign="Uzi11",
+                id=12,
             )
         ],
     )
-    armor = group("Armor", 2, 1, [unit("Armor-1"), unit("Armor-2")])
-    boat = group("Boat", 3, 0, [unit("Boat-1", type="speedboat")])
+    plane["id"] = 7
+    armor = group("Armor", 2, 1, [unit("Armor-1", id=40), unit("Armor-2", id=41)])
+    armor["id"] = 31
+    boat = group("Boat", 3, 0, [unit("Boat-1", type="speedboat", id=50)])
+    boat["id"] = 9
     statics = [
         {
             "name": "0116 | Tech combine object",
@@ -292,7 +302,20 @@ def test_snapshot_parsed(serve: Any, connect: Any) -> None:
     fake = serve(
         [
             ": keep-alive\n\n",
-            event("state", state(0, plane, armor, boat, statics=statics)),
+            event(
+                "state",
+                state(
+                    0,
+                    plane,
+                    armor,
+                    boat,
+                    statics=statics,
+                    meta={
+                        "absTime": 30000.5,
+                        "date": {"Year": 2005, "Month": 7, "Day": 1},
+                    },
+                ),
+            ),
         ]
     )
     _, rec = connect(fake.address)
@@ -305,6 +328,11 @@ def test_snapshot_parsed(serve: Any, connect: Any) -> None:
     assert snap.model_time == pytest.approx(2334.662)
     assert len(snap.units) == 5
     assert snap.unit_count == 4
+    assert snap.abs_time == datetime(2005, 7, 1, 8, 20, 0, 500000)
+    assert snap.max_group_id == 31
+    assert snap.max_unit_id == 117  # statics count, gone ones too
+    assert {"Uzi", "Uzi 1-1", "0116 | Tech combine object"} <= snap.names
+    assert "0117 | Tech hangar A object" in snap.names
 
     by_name = {u.name: u for u in snap.units}
     jet = by_name["Uzi 1-1"]

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterator, TYPE_CHECKING
 
+from game.companionlink.livestate import LiveStateContext
 from .gamelooptimer import GameLoopTimer
 from .gameupdatecallbacks import GameUpdateCallbacks
 from .gameupdateevents import GameUpdateEvents
@@ -30,11 +31,16 @@ class GameLoop:
 
     @property
     def current_time_in_sim(self) -> datetime:
+        """The sim's time; in a dynamic campaign the live mission's, once known."""
+        if self.game.dynamic_campaign:
+            now = LiveStateContext.clock().now()
+            if now is not None:
+                return now
         return self.sim.time
 
     @property
     def elapsed_time(self) -> timedelta:
-        return self.sim.time - self.game.conditions.start_time
+        return self.current_time_in_sim - self.game.conditions.start_time
 
     def start(self) -> None:
         if self.started:
