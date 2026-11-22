@@ -2,12 +2,12 @@
 
 The games are stand-ins: a `dynamic_campaign` flag and the two ATOs, their
 packages holding flights that carry `launched` and a flight plan's
-`takeoff_time()`.
+`startup_time()`, with its `takeoff_time()` ten minutes later.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -22,26 +22,29 @@ def at(hhmm: str) -> datetime:
 
 
 class FakeFlight:
-    def __init__(self, name: str, takeoff: str, launched: bool = False) -> None:
+    def __init__(self, name: str, start: str, launched: bool = False) -> None:
         self.name = name
         self.launched = launched
-        time = at(takeoff)
-        self.flight_plan = SimpleNamespace(takeoff_time=lambda: time)
+        startup = at(start)
+        takeoff = startup + timedelta(minutes=10)
+        self.flight_plan = SimpleNamespace(
+            startup_time=lambda: startup, takeoff_time=lambda: takeoff
+        )
 
     def __repr__(self) -> str:
         return self.name
 
 
 class BrokenFlight(FakeFlight):
-    """A flight whose takeoff time cannot be computed."""
+    """A flight whose start time cannot be computed."""
 
     def __init__(self, name: str) -> None:
         super().__init__(name, "00:00")
 
         def fail() -> datetime:
-            raise RuntimeError("no takeoff time")
+            raise RuntimeError("no start time")
 
-        self.flight_plan = SimpleNamespace(takeoff_time=fail)
+        self.flight_plan = SimpleNamespace(startup_time=fail, takeoff_time=fail)
 
 
 def ato(*packages: list[FakeFlight]) -> SimpleNamespace:
@@ -70,6 +73,15 @@ def due(g: Any, now: datetime | None, receiving: bool = True, **sets: Any) -> An
         sets.get("in_progress", set()),
         sets.get("failed", set()),
     )
+
+
+def test_due_at_start_time() -> None:
+    """Start 14:00, takeoff 14:10: due at the start, not at the takeoff."""
+    flight = FakeFlight("flight", "14:00")
+    g = game([[flight]])
+
+    assert due(g, at("13:59")) == []
+    assert due(g, at("14:00")) == [flight]
 
 
 def test_due_by_the_clock() -> None:
@@ -133,7 +145,7 @@ def test_normal_campaign_never_due() -> None:
     assert due(g, at("09:00")) == []
 
 
-def test_flight_without_takeoff_time_skipped() -> None:
+def test_flight_without_start_time_skipped() -> None:
     broken = BrokenFlight("broken")
     good = FakeFlight("good", "08:00")
     g = game([[broken, good]])
