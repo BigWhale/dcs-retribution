@@ -287,6 +287,7 @@ class GeneratorOptions(QtWidgets.QWizardPage):
             ("Vietnam War Vessels (v3.0.0 by TeTeT)", self.vietnamwarvessels),
         ]
 
+        self.mod_checkboxes = [cb for _, cb in mod_pairs]
         for i in range(len(mod_pairs)):
             if i % 15 == 0:
                 modLayout_row = 1
@@ -321,57 +322,7 @@ class GeneratorOptions(QtWidgets.QWizardPage):
         self.no_enemy_navy.setChecked(s.get("no_enemy_navy", False))
         self.squadrons_start_full.setChecked(s.get("squadron_start_full", False))
 
-        self.f9f_panther.setChecked(s.get("f9f_panther", False))
-        self.a4_skyhawk.setChecked(s.get("a4_skyhawk", False))
-        self.a6a_intruder.setChecked(s.get("a6a_intruder", False))
-        self.a7e_corsair2.setChecked(s.get("a7e_corsair2", False))
-        self.ea6b_prowler.setChecked(s.get("ea6b_prowler", False))
-        self.e7a_wedgetail.setChecked(s.get("e7a_wedgetail", False))
-        self.hercules.setChecked(s.get("hercules", False))
-        self.uh_60l.setChecked(s.get("uh_60l", False))
-        self.f4bc_phantom.setChecked(s.get("f4bc_phantom", False))
-        self.f4e_expanded_weapons.setChecked(s.get("f4e_expanded_weapons", False))
-        self.f15d_baz.setChecked(s.get("f15d_baz", False))
-        self.f_15_idf.setChecked(s.get("f_15_idf", False))
-        self.f_16_idf.setChecked(s.get("f_16_idf", False))
-        self.fa_18efg.setChecked(s.get("fa_18efg", False))
-        self.f22_raptor.setChecked(s.get("f22_raptor", False))
-        self.f84g_thunderjet.setChecked(s.get("f84g_thunderjet", False))
-        self.f100_supersabre.setChecked(s.get("f100_supersabre", False))
-        self.f104_starfighter.setChecked(s.get("f104_starfighter", False))
-        self.f105_thunderchief.setChecked(s.get("f105_thunderchief", False))
-        self.f106_deltadart.setChecked(s.get("f106_deltadart", False))
-        self.jas39_gripen.setChecked(s.get("jas39_gripen", False))
-        self.sk_60.setChecked(s.get("sk_60", False))
-        self.mig31bm_foxhound.setChecked(s.get("mig31bm_foxhound", False))
-        self.mirage_3.setChecked(s.get("mirage_3", False))
-        self.super_etendard.setChecked(s.get("super_etendard", False))
-        self.su30_flanker_h.setChecked(s.get("su30_flanker_h", False))
-        self.su57_felon.setChecked(s.get("su57_felon", False))
-        self.ov10a_bronco.setChecked(s.get("ov10a_bronco", False))
-        self.frenchpack.setChecked(s.get("frenchpack", False))
-        self.high_digit_sams.setChecked(s.get("high_digit_sams", False))
-        self.spanishnavypack.setChecked(s.get("spanishnavypack", False))
-        self.irondome.setChecked(s.get("irondome", False))
-        self.swedishmilitaryassetspack.setChecked(
-            s.get("swedishmilitaryassetspack", False)
-        )
-        self.vietnamwarvessels.setChecked(s.get("vietnamwarvessels", False))
-        self.chinesemilitaryassetspack.setChecked(
-            s.get("chinesemilitaryassetspack", False)
-        )
-        self.iranmilitaryassetspack.setChecked(s.get("iranmilitaryassetspack", False))
-        self.russianmilitaryassetspack.setChecked(
-            s.get("russianmilitaryassetspack", False)
-        )
-        self.usamilitaryassetspack.setChecked(s.get("usamilitaryassetspack", False))
-        self.ukmilitaryassetspack.setChecked(s.get("ukmilitaryassetspack", False))
-        self.ukrainemilitaryassetspack.setChecked(
-            s.get("ukrainemilitaryassetspack", False)
-        )
-        self.tornado_adv.setChecked(s.get("tornado_adv", False))
-        self.vsnf35.setChecked(s.get("vsnf35", False))
-        self.f111c.setChecked(s.get("f111c", False))
-        self.oh_6.setChecked(s.get("oh_6", False))
-        self.oh_6_vietnamassetpack.setChecked(s.get("oh_6_vietnamassetpack", False))
-        self.mam.setChecked(s.get("mam", False))
+        # Every mod starts unticked, whatever the campaign asks for: the server
+        # may not have it, and a mission that needs a missing mod fails to load.
+        for cb in self.mod_checkboxes:
+            cb.setChecked(False)
