@@ -180,7 +180,11 @@ class LiveRecord:
     def keep(self, snapshot: LiveSnapshot) -> bool:
         """Keeps the snapshot as the tick when its mission is decided the
         campaign's own under the name map's uuid, it has its absolute time
-        and its envelope; whether it did."""
+        and its envelope, and it is later in mission time than the tick held;
+        whether it did. The campaign's mission loaded again starts over at its
+        first minute: its snapshots take over only once its clock passes the
+        tick's, so a restore after a DCS restart still restores the later
+        world."""
         known = self.verdicts.get((snapshot.boot, snapshot.session))
         if known is None:
             return False
@@ -188,6 +192,8 @@ class LiveRecord:
         if verdict not in _FOLLOWED or uuid != self.map_marker:
             return False
         if snapshot.abs_time is None or not snapshot.packed:
+            return False
+        if self.tick is not None and snapshot.abs_time <= self.tick.abs_time:
             return False
         self.tick = LiveTick(
             boot=snapshot.boot,

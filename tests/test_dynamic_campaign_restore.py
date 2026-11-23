@@ -42,6 +42,7 @@ from game.companionlink.liveunitmap import LiveUnitMap
 from game.companionlink.restore import (
     RestoreError,
     RestorePlacement,
+    restore_start,
     sort_launched,
     write_restore,
 )
@@ -216,6 +217,28 @@ def test_tick_kept_only_for_the_name_maps_mission(game: Game) -> None:
     assert record.decide(late) is MissionVerdict.OWN_AGAIN
     assert not record.keep(late)
     assert record.tick is not None and record.tick.boot == "b4"
+
+
+def test_mission_loaded_again_keeps_the_later_tick(game: Game) -> None:
+    """DCS stops and loads the campaign's mission file again (lake,
+    2026-11-23): the reloaded mission starts over at its first minute, so its
+    snapshots do not replace the tick until its clock passes the tick's."""
+    record = game.live
+    ran = taken(envelope(game, "b1", 95))
+    assert record.decide(ran) is MissionVerdict.OWN
+    assert record.keep(ran)
+
+    reloaded = taken(envelope(game, "b2", 0))
+    assert record.decide(reloaded) is MissionVerdict.OWN_AGAIN
+    assert not record.keep(reloaded)
+    assert record.tick is not None
+    assert (record.tick.boot, record.tick.minute) == ("b1", 95)
+    assert restore_start(record.tick) == START + timedelta(minutes=95)
+
+    caught_up = taken(envelope(game, "b2", 96))
+    assert record.decide(caught_up) is MissionVerdict.OWN_AGAIN
+    assert record.keep(caught_up)
+    assert (record.tick.boot, record.tick.minute) == ("b2", 96)
 
 
 def test_tick_survives_save_and_load(game: Game, tmp_path: Path) -> None:
@@ -435,9 +458,11 @@ def snapshot_of(
 
 
 def tick_of(game: Game, miz: Path, **kwargs: Any) -> LiveSnapshot:
-    """`snapshot_of` decided and kept as the record's tick."""
+    """`snapshot_of` decided and kept as the record's tick, in place of any
+    tick the game holds (a copied game holds its source's, at the same time)."""
     snapshot = snapshot_of(game, miz, **kwargs)
     game.live.decide(snapshot)
+    game.live.tick = None
     assert game.live.keep(snapshot)
     return snapshot
 
