@@ -839,18 +839,25 @@ def test_save_while_awaiting_keeps_saved_at(
     record.mark_saved(5.0)
     assert record.saved_at == stood
     mission_clock(5.0)
-    record = save_and_load(game, tmp_path / "b.retribution").live
+    awaiting = save_and_load(game, tmp_path / "b.retribution")
+    record = awaiting.live
     assert record.saved_at == stood
 
     assert not record.pick_up(a, view(a, 1301.0)).picked
-    record.decide(a)
+    assert record.decide(a) is MissionVerdict.MOVED_ON
     record.mark_saved(5.0)
     assert record.saved_at == stood
-    again = save_and_load(game, tmp_path / "c.retribution").live
+    # The refused game saved (save_game marks it too) and loaded again: it
+    # holds the mission MOVED_ON and still knows where it stood.
+    refused_save = save_and_load(awaiting, tmp_path / "c.retribution")
+    again = refused_save.live
     assert again.saved_at == stood
+    assert again.verdict_of(("boot-a", 1)) is MissionVerdict.MOVED_ON
 
     refused = again.pick_up(a, view(a, 1400.0))
-    assert refused.reason == "the server's mission is 6 minutes past this save"
+    assert refused == PickUp(
+        True, False, 400.0, "the server's mission is 6 minutes past this save"
+    )
     assert again.decide(a) is MissionVerdict.MOVED_ON
 
 
