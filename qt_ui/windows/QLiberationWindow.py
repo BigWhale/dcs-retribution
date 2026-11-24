@@ -96,6 +96,8 @@ class QLiberationWindow(QMainWindow):
         self.dynamic_autosave = DynamicAutosave(
             self.companion_link, lambda: self.flight_launcher.launching, self
         )
+        # A dynamic campaign is autosaved after each launch.
+        self.flight_launcher.launched.connect(self.dynamic_autosave.autosave_now)
         self.ato_panel = QAirTaskingOrderPanel(self.game_model, self.flight_launcher)
         # Each snapshot moves the mission clock: the lists' times are dated
         # against it.
@@ -709,6 +711,10 @@ class QLiberationWindow(QMainWindow):
         if result in [QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No]:
             if result == QMessageBox.StandardButton.Yes:
                 self.saveGame()
+            # A dynamic campaign that has begun keeps its own record, whatever
+            # the answer: autosaved, after a launch on its way (up to
+            # `QUIT_WAIT_S`).
+            self.dynamic_autosave.autosave_on_quit()
             self.flight_launcher.stop()
             self.companion_link.stop()
             self._save_window_geometry()

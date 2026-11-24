@@ -20,6 +20,10 @@ lost or stale. A spawn confirmed while the link is merely lost or stale, in a
 mission still the campaign's, is launched: the mission may still be running,
 and launching it again could put a second group in it.
 
+The id the companion gives each spawn (`s-<n>`) is recorded in the game's
+live record (`game.live.spawn_asked`) as soon as the spawn is accepted, before
+it is confirmed: a save then knows which spawns it asked for.
+
 A spawn the companion has accepted but not yet confirmed keeps its flight
 busy (not due, not editable, no Launch) while the worker follows it, up to
 `CONFIRM_CAP_S`: launching it again could put a second group in the mission.
@@ -61,6 +65,7 @@ mission (the snapshot's boot and session) and start afresh with a new mission.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from collections.abc import Sequence
@@ -116,6 +121,8 @@ CLAIM_AHEAD_S = 60.0
 #: How long a launch waits for the companion's held names, in seconds; the
 #: GUI thread waits on it.
 HELD_TIMEOUT_S = 2.0
+#: A spawn id the companion gives: `s-<n>`.
+SPAWN_ID = re.compile(r"s-(\d+)")
 
 
 def flight_locked(flight: Flight, launcher: Optional[FlightLauncher] = None) -> bool:
@@ -157,6 +164,9 @@ class FlightLauncher(QObject):
     # From a worker thread: (epoch, flight, spawn id, error or None, whether
     # the companion holds the spawn though it was not confirmed).
     _spawn_done = Signal(object, object, object, object, object)
+    # From a worker thread: (epoch, spawn id), as soon as the companion
+    # accepted the spawn.
+    _spawn_asked = Signal(int, str)
 
     def __init__(
         self, link: CompanionLinkController, parent: Optional[QObject] = None
@@ -194,6 +204,7 @@ class FlightLauncher(QObject):
         # the connection type wrong.)
         queued = Qt.ConnectionType.QueuedConnection
         self._spawn_done.connect(self._on_spawn_done, queued)  # type: ignore[arg-type]
+        self._spawn_asked.connect(self._on_spawn_asked, queued)  # type: ignore[arg-type]
 
     @classmethod
     def current(cls) -> Optional[FlightLauncher]:
@@ -395,6 +406,7 @@ class FlightLauncher(QObject):
         except Exception as e:
             self._spawn_done.emit(epoch, flight, None, _text(e), False)
             return
+        self._spawn_asked.emit(epoch, spawn_id)
 
         asked = time.monotonic()
         warned = False
@@ -458,6 +470,19 @@ class FlightLauncher(QObject):
                 return
             self._spawn_done.emit(epoch, flight, spawn_id, None, False)
             return
+
+    @Slot(int, str)
+    def _on_spawn_asked(self, epoch: int, spawn_id: str) -> None:
+        """The companion accepted a spawn: its id goes in the live record of
+        the game it was sent for."""
+        game = self._game
+        if epoch != self._epoch or game is None:
+            return
+        match = SPAWN_ID.fullmatch(spawn_id)
+        if match is None:
+            log.warning("Launch: spawn id %r is not s-<n>; not recorded", spawn_id)
+            return
+        game.live.spawn_asked(int(match.group(1)))
 
     @Slot(object, object, object, object, object)
     def _on_spawn_done(

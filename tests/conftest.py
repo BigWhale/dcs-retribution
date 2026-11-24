@@ -329,9 +329,12 @@ class FakeCommands:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.requests: list[tuple[dict[str, Any], dict[str, str]]] = []
-        #: The answer to the next POST /v1/spawn, or None for 202 s-1.
+        #: The answer to the next POST /v1/spawn, or None for 202 `spawn_id`.
         self.refuse: Optional[tuple[int, str]] = None
-        #: The statuses GET /v1/spawns/s-1 gives, in turn; the last repeats.
+        #: The id every spawn is given.
+        self.spawn_id = "s-1"
+        #: The statuses GET /v1/spawns/<spawn_id> gives, in turn; the last
+        #: repeats.
         #: "http:503" answers that HTTP status with an error instead.
         self.statuses: list[str] = []
         #: The groups POST /v1/despawn removes, with their units; others 404.
@@ -385,7 +388,7 @@ class FakeCommands:
                 if refuse is not None:
                     self.answer(refuse[0], {"error": refuse[1]})
                     return
-                self.answer(202, {"id": "s-1"})
+                self.answer(202, {"id": fake.spawn_id})
 
             def do_GET(self) -> None:
                 if not self.authorized():
@@ -393,8 +396,10 @@ class FakeCommands:
                 if self.path == "/v1/spawns":
                     self.list_spawns()
                     return
-                if self.path != "/v1/spawns/s-1":
-                    self.answer(404, {"error": "no spawn s-2"})
+                if self.path != f"/v1/spawns/{fake.spawn_id}":
+                    self.answer(
+                        404, {"error": f"no spawn {self.path.rsplit('/', 1)[-1]}"}
+                    )
                     return
                 with fake.lock:
                     status = (
@@ -406,7 +411,7 @@ class FakeCommands:
                     self.answer(int(status[5:]), {"error": "not now"})
                     return
                 spawn: dict[str, Any] = {
-                    "id": "s-1",
+                    "id": fake.spawn_id,
                     "name": "LINK 1",
                     "country": 2,
                     "category": "plane",

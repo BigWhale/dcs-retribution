@@ -24,7 +24,8 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PySide6.QtCore import QEvent, QSettings  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox, QWidget  # noqa: E402
 
 from game import persistency  # noqa: E402
 from game.ato.flight import Flight  # noqa: E402
@@ -38,6 +39,7 @@ from game.sim import GameUpdateEvents  # noqa: E402
 from game.theater import Player  # noqa: E402
 from qt_ui import (  # noqa: E402
     companionlinkcontroller,
+    dynamicautosave,
     flightlauncher,
     liberation_install,
     liberation_theme,
@@ -54,6 +56,8 @@ from qt_ui.simcontroller import SimController  # noqa: E402
 from qt_ui.uiflags import UiFlags  # noqa: E402
 from qt_ui.widgets.QTopPanel import QTopPanel  # noqa: E402
 from qt_ui.windows.GameUpdateSignal import GameUpdateSignal  # noqa: E402
+from qt_ui.windows.QLiberationWindow import QLiberationWindow  # noqa: E402
+import qt_ui.windows.QLiberationWindow as liberation_window  # noqa: E402
 import qt_ui.widgets.QTopPanel as top_panel  # noqa: E402
 from tests.conftest import (  # noqa: E402
     COMMAND_TOKEN,
@@ -1088,3 +1092,255 @@ def test_spawn_confirmed_into_restored_away_mission(
         w.wait_for(lambda: flight.launched)
     finally:
         launcher.stop()
+
+
+def use_commands(monkeypatch: pytest.MonkeyPatch, commands: FakeCommands) -> None:
+    """Launches go to the fake command port."""
+    monkeypatch.setattr(
+        liberation_install, "companion_command_address", lambda: commands.address
+    )
+    monkeypatch.setattr(
+        liberation_install, "companion_command_token", lambda: COMMAND_TOKEN
+    )
+
+
+def test_spawn_id_recorded_when_asked(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[[FakeCompanion], Window],
+    game: Game,
+    commands: FakeCommands,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    use_commands(monkeypatch, commands)
+    commands.spawn_id = "s-7"
+    commands.statuses = ["waiting"]  # accepted, never confirmed
+    w = window(serve([event("state", state(game, 1))]))
+    launcher = FlightLauncher(w.link)
+    launcher.confirm_warn_s = launcher.confirm_cap_s = 30.0
+    launcher.confirm_poll_s = 0.05
+    launcher.set_game(game)
+    try:
+        w.wait_for(lambda: following(game) and launcher.receiving)
+        flight = plan_by_hand(game, 2)
+        launcher.launch_now(flight)
+
+        def saved_spawn() -> Optional[int]:
+            game.live.mark_saved(LiveStateContext.clock().model_time())
+            assert game.live.saved_at is not None
+            return game.live.saved_at.spawn
+
+        w.wait_for(lambda: saved_spawn() == 7)
+        assert launcher.is_busy(flight) and not flight.launched
+    finally:
+        with commands.lock:
+            commands.statuses = ["failed"]  # the worker ends
+        launcher.stop()
+
+
+class NoMap(QWidget):
+    """The main window's map without its web view (Qt WebEngine does not run
+    on the offscreen platform here)."""
+
+    def __init__(self, *_args: Any) -> None:
+        super().__init__()
+
+
+@pytest.fixture
+def main_window(
+    app: QApplication,
+    boxes: Boxes,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Iterator[Callable[..., QLiberationWindow]]:
+    """Opens Retribution's main window on `game`, its link on `fake` (none
+    for a game without a link); its geometry kept in `tmp_path`."""
+    made: list[QLiberationWindow] = []
+    monkeypatch.setattr(liberation_window, "QLiberationMap", NoMap)
+    settings = str(tmp_path / "qt-ui.ini")
+    monkeypatch.setattr(
+        QLiberationWindow,
+        "_qsettings",
+        lambda _self: QSettings(settings, QSettings.Format.IniFormat),
+    )
+    monkeypatch.setattr(EventStream, "put_nowait", lambda _events: None)
+    liberation_theme.set_theme_index(liberation_theme.DEFAULT_THEME_INDEX)
+    uiconstants.load_icons()
+    if GameUpdateSignal.get_instance() is None:
+        GameUpdateSignal()
+
+    def open_window(fake: Optional[FakeCompanion], game: Game) -> QLiberationWindow:
+        if fake is not None:
+            monkeypatch.setattr(
+                liberation_install, "companion_address", lambda: fake.address
+            )
+            monkeypatch.setattr(liberation_install, "companion_token", lambda: TOKEN)
+        win = QLiberationWindow(
+            game, UiFlags(dev_ui_webserver=False, show_sim_speed_controls=False)
+        )
+        made.append(win)
+        return win
+
+    yield open_window
+    signal = GameUpdateSignal.get_instance()
+    for win in made:
+        signal.gameupdated.disconnect(win.setGame)
+        signal.debriefingReceived.disconnect(win.onDebriefing)
+        signal.game_state_changed.disconnect(win.onEndGame)
+        signal.gameupdated.disconnect(win.top_panel.setGame)
+        signal.budgetupdated.disconnect(win.top_panel.budget_update)
+        win.dynamic_autosave.set_game(None)
+        win.flight_launcher.stop()
+        win.companion_link.stop()
+        # Gone, so a later window's close does not close it again.
+        win.deleteLater()
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    LiveStateContext.set(None)
+
+
+def pumped_until(app: QApplication, cond: Callable[[], bool]) -> None:
+    """Turns the Qt event loop until `cond` holds."""
+
+    def pumped() -> bool:
+        app.processEvents()
+        return cond()
+
+    wait_until(pumped, timeout=DEADLINE)
+
+
+def autosave_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if AUTOSAVE_LINE.fullmatch(r.getMessage())
+    ]
+
+
+def mtime(path: Path) -> Optional[int]:
+    return path.stat().st_mtime_ns if path.exists() else None
+
+
+def test_autosave_after_launch(
+    app: QApplication,
+    serve: Callable[..., FakeCompanion],
+    main_window: Callable[..., QLiberationWindow],
+    game: Game,
+    commands: FakeCommands,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    use_commands(monkeypatch, commands)
+    commands.statuses = ["waiting"]
+    win = main_window(serve([event("state", state(game, 1))]), game)
+    launcher = win.flight_launcher
+    launcher.confirm_poll_s = 0.05
+    path = persistency.dynamic_autosave_path()
+    pumped_until(app, lambda: following(game) and game.live.cursor == 0)
+    pumped_until(app, lambda: launcher.receiving)
+    before = mtime(path)  # live losses saved the first cursor
+    flight = plan_by_hand(game, 2)
+
+    launcher.launch_now(flight)
+    pumped_until(app, lambda: len(commands.requests) == 1)
+    app.processEvents()
+    assert mtime(path) == before, "not while the flight is launching"
+    with commands.lock:
+        commands.statuses = ["spawned"]
+    pumped_until(app, lambda: flight.launched)
+
+    assert mtime(path) != before
+    saved = persistency.load_game(str(path))
+    assert saved is not None
+    [in_flight] = [f for f in ato_flights(saved) if f.launched]
+    assert in_flight.live_group_name == flight.live_group_name is not None
+    assert len(autosave_lines(caplog)) == 1
+
+
+def test_autosave_on_quit(
+    app: QApplication,
+    serve: Callable[..., FakeCompanion],
+    main_window: Callable[..., QLiberationWindow],
+    game: Game,
+    boxes: Boxes,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    win = main_window(serve([event("state", state(game, 1))]), game)
+    path = persistency.dynamic_autosave_path()
+    pumped_until(app, lambda: following(game) and game.live.cursor == 0)
+    path.unlink()  # live losses saved the first cursor
+
+    boxes.answer = QMessageBox.StandardButton.No
+    win.close()
+
+    assert [b[1] for b in boxes.shown] == ["Quit Retribution?"]
+    saved = persistency.load_game(str(path))
+    assert saved is not None and saved.live.marker == game.live.marker
+    assert len(autosave_lines(caplog)) == 1
+
+
+def test_autosave_on_quit_waits_for_launch(
+    app: QApplication,
+    serve: Callable[..., FakeCompanion],
+    main_window: Callable[..., QLiberationWindow],
+    game: Game,
+    commands: FakeCommands,
+    boxes: Boxes,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A launch in progress for longer than `QUIT_WAIT_S` is waited for that
+    long, then the autosave is written anyway."""
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(dynamicautosave, "QUIT_WAIT_S", 0.2)
+    use_commands(monkeypatch, commands)
+    commands.statuses = ["waiting"]  # accepted, not confirmed
+    win = main_window(serve([event("state", state(game, 1))]), game)
+    launcher = win.flight_launcher
+    launcher.confirm_warn_s = launcher.confirm_cap_s = 30.0
+    launcher.confirm_poll_s = 0.05
+    path = persistency.dynamic_autosave_path()
+    pumped_until(app, lambda: following(game) and game.live.cursor == 0)
+    pumped_until(app, lambda: launcher.receiving)
+    flight = plan_by_hand(game, 2)
+    launcher.launch_now(flight)
+    pumped_until(app, lambda: len(commands.requests) == 1)
+    path.unlink()  # live losses saved the first cursor
+
+    boxes.answer = QMessageBox.StandardButton.No
+    started = time.monotonic()
+    try:
+        win.close()
+        waited = time.monotonic() - started
+    finally:
+        with commands.lock:
+            commands.statuses = ["failed"]  # the worker ends
+
+    assert waited >= 0.2
+    assert path.exists()
+    assert len(autosave_lines(caplog)) == 1
+    messages = [r.getMessage() for r in caplog.records]
+    assert "Autosave: a flight is still launching after 0.2 s; saving anyway" in (
+        messages
+    )
+
+
+def test_quit_normal_campaign_no_dynamic_autosave(
+    app: QApplication,
+    saved_games: Path,
+    main_window: Callable[..., QLiberationWindow],
+    boxes: Boxes,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    game = new_game(dynamic=False, squadrons_start_full=True, campaign_file=CAMPAIGN)
+    game.pass_turn(no_action=True)
+    persistency.dynamic_autosave_path().unlink(missing_ok=True)
+    win = main_window(None, game)
+
+    boxes.answer = QMessageBox.StandardButton.No
+    win.close()
+
+    assert [b[1] for b in boxes.shown] == ["Quit Retribution?"]
+    assert not persistency.dynamic_autosave_path().exists()
+    assert autosave_lines(caplog) == []
