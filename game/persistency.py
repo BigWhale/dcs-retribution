@@ -4,12 +4,14 @@ import logging
 import os
 import pickle
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING, Any
 
 import dcs.terrain.falklands.airports
 
 import pydcs_extensions
+from game.companionlink.livestate import LiveStateContext
 from game.profiling import logged_duration
 from pydcs_extensions import (
     ELM2084_MMR_AD_RT,
@@ -428,6 +430,27 @@ def mission_path_for(name: str) -> Path:
     return base_path() / "Missions" / name
 
 
+def dynamic_mission_path(now: datetime) -> Path:
+    """Where a dynamic campaign's mission written at `now` (the local wall
+    clock) goes: `retribution_dynamic_YYYYMMDD_HHMM.miz` in DCS's `Missions/`,
+    `_2`, `_3`, ... before `.miz` while the name is taken."""
+    stem = f"retribution_dynamic_{now:%Y%m%d_%H%M}"
+    path = mission_path_for(f"{stem}.miz")
+    n = 2
+    while path.exists():
+        path = mission_path_for(f"{stem}_{n}.miz")
+        n += 1
+    return path
+
+
+def _mark_saved(game: Game) -> None:
+    """A dynamic game's live record notes where the save stands, the mission
+    clock's model time with it."""
+    live = getattr(game, "live", None)  # None: a save from before the record
+    if game.dynamic_campaign and live is not None:
+        live.mark_saved(LiveStateContext.clock().model_time())
+
+
 def load_game(path: str) -> Optional[Game]:
     with open(path, "rb") as f:
         try:
@@ -442,6 +465,7 @@ def load_game(path: str) -> Optional[Game]:
 def save_game(game: Game) -> bool:
     with logged_duration("Saving game"):
         try:
+            _mark_saved(game)
             with open(_temporary_save_file(), "wb") as f:
                 data = _unload_static_data(game)
                 pickle.dump(game, f)
@@ -491,6 +515,7 @@ def _autosave_dynamic(game: Game) -> bool:
     path = dynamic_autosave_path()
     temporary = path.with_name(path.name + ".tmp")
     try:
+        _mark_saved(game)
         with open(temporary, "wb") as f:
             data = _unload_static_data(game)
             try:

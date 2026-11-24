@@ -35,6 +35,7 @@ from dcs.unitgroup import FlyingGroup
 
 from game import persistency
 from game.ato.flight import Flight
+from game.companionlink.commands import SpawnsView
 from game.companionlink.eventlog import EventBatch, LogEntry, LogPos, LogRef
 from game.companionlink.livelosses import apply_entries
 from game.companionlink.liverecord import MARKER_PREFIX, MissionVerdict
@@ -117,7 +118,10 @@ def own(running: Game) -> Game:
 
 
 def copy(game: Game) -> Game:
-    return cast(Game, pickle.loads(pickle.dumps(game)))
+    """A copy of the game; a copy is not a loaded save: it awaits no pick-up."""
+    copied = cast(Game, pickle.loads(pickle.dumps(game)))
+    copied.live.end_pickup()
+    return copied
 
 
 def envelope(
@@ -200,11 +204,11 @@ def test_tick_kept_only_for_the_name_maps_mission(game: Game) -> None:
     assert not record.keep(unpacked)
     assert record.tick is tick
 
+    # The campaign's mission loaded again from its start is not followed.
     again = taken(envelope(game, "b3", 6))
     assert record.decide(again) is MissionVerdict.OWN_AGAIN
-    assert record.keep(again)
-    assert record.tick is not None
-    assert (record.tick.boot, record.tick.minute) == ("b3", 6)
+    assert not record.keep(again)
+    assert record.tick is tick
 
     # A newer mission written and loaded: the name map is its, and a snapshot
     # of the earlier mission, still running, is not kept.
@@ -219,10 +223,11 @@ def test_tick_kept_only_for_the_name_maps_mission(game: Game) -> None:
     assert record.tick is not None and record.tick.boot == "b4"
 
 
-def test_mission_loaded_again_keeps_the_later_tick(game: Game) -> None:
+def test_mission_loaded_again_never_replaces_the_tick(game: Game) -> None:
     """DCS stops and loads the campaign's mission file again (lake,
-    2026-11-23): the reloaded mission starts over at its first minute, so its
-    snapshots do not replace the tick until its clock passes the tick's."""
+    2026-11-23): the reloaded mission starts over at its first minute. It is
+    not followed, so its snapshots never replace the tick, not even once its
+    clock passes the tick's: Continue restores the world the tick saw."""
     record = game.live
     ran = taken(envelope(game, "b1", 95))
     assert record.decide(ran) is MissionVerdict.OWN
@@ -237,8 +242,8 @@ def test_mission_loaded_again_keeps_the_later_tick(game: Game) -> None:
 
     caught_up = taken(envelope(game, "b2", 96))
     assert record.decide(caught_up) is MissionVerdict.OWN_AGAIN
-    assert record.keep(caught_up)
-    assert (record.tick.boot, record.tick.minute) == ("b2", 96)
+    assert not record.keep(caught_up)
+    assert (record.tick.boot, record.tick.minute) == ("b1", 95)
 
 
 def test_tick_survives_save_and_load(game: Game, tmp_path: Path) -> None:
@@ -263,6 +268,9 @@ def test_slice_one_save_loads_without_tick(game: Game, tmp_path: Path) -> None:
     assert loaded.live.tick is None
     record = loaded.live
     own = taken(envelope(loaded, "b1", 2))
+    # The mission written and never followed, two minutes in: picked up.
+    picked = record.pick_up(own, SpawnsView("b1", 1, own.model_time, ()))
+    assert picked.picked
     assert record.decide(own) is MissionVerdict.OWN
     assert record.keep(own)
     assert record.tick is not None and record.tick.minute == 2

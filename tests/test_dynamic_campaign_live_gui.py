@@ -75,7 +75,9 @@ DEADLINE = 5.0
 BATCH_LINE = re.compile(r"Live losses: \d+ entries, ")
 AUTOSAVE_LINE = re.compile(r"Autosave: (.+) in \d+ ms")
 #: The status while another mission runs.
-FOLLOWED_NOT = "Companion: another mission is running; waiting for this campaign's"
+FOLLOWED_NOT = (
+    "Companion: another mission is running; Continue to load the campaign's mission"
+)
 
 
 @pytest.fixture(scope="module")
@@ -292,9 +294,7 @@ def test_only_own_mission_followed(
 
     foreign_gate.set()
     w.wait_for(lambda: "another mission" in w.link.status_text())
-    assert w.link.status_text() == (
-        "Companion: another mission is running; waiting for this campaign's"
-    )
+    assert w.link.status_text() == FOLLOWED_NOT
     assert not following(game)
     assert game.live.tick is tick, "another mission's snapshot is not kept"
     held = LiveStateContext.get()

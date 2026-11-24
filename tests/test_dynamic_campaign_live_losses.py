@@ -21,10 +21,11 @@ import pickle
 import pickletools
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, cast
+from typing import Any, Callable, Iterator, cast
 
 import dcs.terrain
 import pytest
@@ -38,6 +39,7 @@ from game.ato.flight import Flight
 from game.ato.flighttype import FlightType
 from game.ato.package import Package
 from game.ato.starttype import StartType
+from game.companionlink.commands import SpawnsView
 from game.companionlink.eventlog import EventBatch, LogEntry, LogPos, LogRef
 from game.companionlink.linkstatus import LinkStatus
 from game.companionlink.livelosses import apply_entries, finish_flight, settle
@@ -45,8 +47,12 @@ from game.companionlink.liverecord import (
     MARKER_PREFIX,
     LiveRecord,
     MissionVerdict,
+    PickUp,
+    SavedAt,
     companion_status,
+    picked_up_note,
 )
+from game.companionlink.livestate import LiveStateContext
 from game.companionlink.liveunitmap import LiveUnitMap, ZoneShape
 from game.companionlink.snapshot import LiveSnapshot, LiveUnit
 from game.dcs.groundunittype import GroundUnitType
@@ -71,6 +77,7 @@ from tests.conftest import (
     generate_starting_mission,
     new_game,
     plan_by_hand,
+    save_and_load,
     squadrons,
 )
 
@@ -484,9 +491,10 @@ def test_lost_mission_is_not_followed() -> None:
     followed.append(record.following_own_mission)
     record.decide(snapshot("a", 2))
     followed.append(record.following_own_mission)
+    # The campaign's mission loaded again from its start is not followed.
     record.decide(snapshot("b", 1, marker))
     followed.append(record.following_own_mission)
-    assert followed == [False, True, False, True, False, True]
+    assert followed == [False, True, False, True, False, False]
 
     foreign = snapshot("a", 2, minute=3, units=5)
     status = companion_status
@@ -500,15 +508,12 @@ def test_lost_mission_is_not_followed() -> None:
     assert status(LinkStatus.RECEIVING, own, True, MissionVerdict.OWN) == waiting
     assert (
         status(LinkStatus.RECEIVING, foreign, False, MissionVerdict.FOREIGN)
-        == "Companion: another mission is running; waiting for this campaign's"
+        == "Companion: another mission is running; "
+        "Continue to load the campaign's mission"
     )
     assert (
         status(LinkStatus.RECEIVING, own, False, MissionVerdict.OWN)
         == "DCS Companion time: 12 minutes"
-    )
-    assert (
-        status(LinkStatus.RECEIVING, own, False, MissionVerdict.OWN_AGAIN)
-        == "DCS Companion time: 12 minutes\nMission restarted: earlier losses stay"
     )
     first = snapshot("a", 1, marker, minute=1, units=1234)
     assert (
@@ -552,8 +557,11 @@ def test_game_does_not_import_the_link() -> None:
 @pytest.fixture
 def own_game(started: Started) -> Game:
     """A copy of Begin Campaign's game, for a test that changes it; the
-    module's game stays as the tests that only read it found it."""
-    return cast(Game, pickle.loads(pickle.dumps(started.game)))
+    module's game stays as the tests that only read it found it. A copy is
+    not a loaded save: it awaits no pick-up."""
+    game = cast(Game, pickle.loads(pickle.dumps(started.game)))
+    game.live.end_pickup()
+    return game
 
 
 def test_record_survives_save_and_load(
@@ -585,6 +593,393 @@ def test_record_survives_save_and_load(
     assert live.ready() == []  # held entries are not saved; the link reads again
     # No mission is followed until a snapshot decides one again.
     assert not live.following_own_mission
+    assert live.awaiting_pickup
+
+
+# The pick-up: a loaded save follows the running mission only when it is the
+# save's own, has not run on more than five minutes and holds no spawn the
+# save does not know.
+
+STATUS_TIME = "DCS Companion time: 12 minutes"
+CONTINUE = "; Continue to load the campaign's mission"
+
+
+@pytest.fixture
+def mission_clock() -> Iterator[Callable[[float], None]]:
+    """Stands the mission clock at a model time; reset before and after."""
+    LiveStateContext.set(None)
+
+    def stand_at(model_time: float) -> None:
+        clock = LiveStateContext.clock()
+        sample = replace(
+            snapshot("clock", 1),
+            model_time=model_time,
+            abs_time=datetime(2015, 6, 1, 8, 0),
+        )
+        clock.update(sample, 0.0)
+        clock.hold(0.0)
+
+    yield stand_at
+    LiveStateContext.set(None)
+
+
+def view(of: LiveSnapshot, model_time: float, *spawns: tuple[int, str]) -> SpawnsView:
+    """The companion's spawns of the snapshot's mission."""
+    return SpawnsView(of.boot, of.session, model_time, spawns)
+
+
+def loaded_followed_at(
+    game: Game,
+    stand_at: Callable[[float], None],
+    path: Path,
+    model_time: float = 1000.0,
+) -> tuple[Game, LiveSnapshot]:
+    """The game following its mission `boot-a` at `model_time`, spawn `s-4`
+    asked, saved and loaded again; the cursor at 10."""
+    record = game.live
+    a = snapshot("boot-a", 1, MARKER_PREFIX + str(record.marker))
+    record.receive(EventBatch((), through=10))
+    assert record.decide(a) is MissionVerdict.OWN
+    record.spawn_asked(4)
+    record.spawn_asked(2)
+    stand_at(model_time)
+    record.mark_saved(model_time)
+    assert record.saved_at == SavedAt(("boot-a", 1), model_time, 4)
+    return save_and_load(game, path), a
+
+
+def load(path: Path) -> Game:
+    """Opens the save at `path`, as opening a save does."""
+    game = persistency.load_game(str(path))
+    assert game is not None
+    Migrator(game, is_liberation=False)
+    return game
+
+
+def test_mission_loaded_again_not_followed() -> None:
+    record = LiveRecord()
+    marker = MARKER_PREFIX + record.new_marker()
+    record.written(LiveUnitMap())
+    record.receive(EventBatch((), through=10))
+    at = datetime(2015, 6, 1, 8, 0)
+    a = replace(snapshot("a", 1, marker, minute=95), abs_time=at, packed=b"a")
+    assert record.decide(a) is MissionVerdict.OWN
+    assert record.keep(a)
+
+    b = replace(snapshot("b", 1, marker, minute=96), abs_time=at, packed=b"b")
+    record.receive(EventBatch((entry(11, "b", 1), entry(12, "b", 1)), through=12))
+    assert record.decide(b) is MissionVerdict.OWN_AGAIN
+    assert not record.following_own_mission
+    b_later = replace(b, abs_time=datetime(2015, 6, 1, 10, 0))
+    assert not record.keep(b_later), "not even past the tick's time"
+    assert record.tick is not None and record.tick.boot == "a"
+    assert record.ready() == []
+    assert record.cursor == 12 and not record.has_held
+    assert (
+        companion_status(LinkStatus.RECEIVING, b, False, record.current_verdict)
+        == "Companion: the campaign's mission was loaded again from its start; "
+        "Continue to load it as it stood"
+    )
+
+
+def test_pickup_followed_at_save(
+    own_game: Game,
+    mission_clock: Callable[[float], None],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    game, a = loaded_followed_at(own_game, mission_clock, tmp_path / "a.retribution")
+    record = game.live
+    assert game.live.awaiting_pickup
+    assert record.saved_at == SavedAt(("boot-a", 1), 1000.0, 4)
+    record.receive(EventBatch((entry(11, "boot-a", 1), entry(12, "boot-a", 1)), 12))
+    assert record.ready() == []
+    assert not game.live.following_own_mission
+
+    with caplog.at_level(logging.INFO):
+        picked = record.pick_up(a, view(a, 1290.0, (4, "spawned"), (5, "failed")))
+
+    assert picked == PickUp(True, True, 290.0, None)
+    assert not record.awaiting_pickup
+    assert record.decide(a) is MissionVerdict.OWN
+    assert record.following_own_mission
+    assert [e.seq for e in record.ready()] == [11, 12]
+    assert "Pick-up: picked up boot boot-a session 1, 290 s after the save" in (
+        caplog.text
+    )
+
+
+def test_pickup_too_late(
+    own_game: Game,
+    mission_clock: Callable[[float], None],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    game, a = loaded_followed_at(own_game, mission_clock, tmp_path / "a.retribution")
+    record = game.live
+    record.receive(EventBatch((entry(11, "boot-a", 1), entry(12, "boot-a", 1)), 12))
+
+    with caplog.at_level(logging.INFO):
+        refused = record.pick_up(a, view(a, 1301.0, (4, "spawned")))
+
+    reason = "the server's mission is 5 minutes past this save"
+    assert refused == PickUp(True, False, 301.0, reason)
+    assert not record.awaiting_pickup
+    assert record.decide(a) is MissionVerdict.MOVED_ON
+    assert record.verdicts[("boot-a", 1)] == (MissionVerdict.MOVED_ON, record.marker)
+    assert not record.following_own_mission
+    assert record.ready() == []
+    assert record.cursor == 12 and not record.has_held
+    assert record.moved_on_reason == reason
+    assert f"Pick-up: not picked up: {reason}" in caplog.text
+    own = replace(a, minute=12)
+    assert (
+        companion_status(
+            LinkStatus.RECEIVING, own, False, record.current_verdict, reason=reason
+        )
+        == f"Companion: {reason}{CONTINUE}"
+    )
+
+
+def test_pickup_unknown_spawn(
+    own_game: Game, mission_clock: Callable[[float], None], tmp_path: Path
+) -> None:
+    game, a = loaded_followed_at(own_game, mission_clock, tmp_path / "a.retribution")
+
+    refused = game.live.pick_up(a, view(a, 1290.0, (5, "spawned"), (6, "waiting")))
+
+    assert refused == PickUp(
+        True,
+        False,
+        290.0,
+        "the server's mission has 2 flights this save never launched",
+    )
+    assert game.live.decide(a) is MissionVerdict.MOVED_ON
+
+    again = load(tmp_path / "a.retribution").live
+    one = again.pick_up(a, view(a, 1290.0, (3, "spawned"), (5, "despawned")))
+    assert one.reason == "the server's mission has 1 flight this save never launched"
+
+
+def test_pickup_written_not_followed(
+    own_game: Game, mission_clock: Callable[[float], None], tmp_path: Path
+) -> None:
+    """Retribution closed while Begin's or Continue's mission loaded: the
+    mission carries the newest marker, never followed; its clock counts from
+    0."""
+    record = own_game.live
+    assert record.marker is not None and record.map_marker != record.marker
+    path = tmp_path / "w.retribution"
+    first = save_and_load(own_game, path).live
+    assert first.saved_at.mission is None
+    n = snapshot("boot-n", 1, MARKER_PREFIX + record.marker)
+
+    assert first.pick_up(n, view(n, 200.0)) == PickUp(True, True, 200.0, None)
+    assert first.decide(n) is MissionVerdict.OWN
+    assert first.following_own_mission
+
+    second = load(path).live
+    refused = second.pick_up(n, view(n, 301.0))
+    assert refused.decided and not refused.picked
+    assert refused.reason == "the server's mission is 5 minutes past this save"
+    assert second.verdicts[("boot-n", 1)] == (MissionVerdict.MOVED_ON, record.marker)
+    assert second.decide(n) is MissionVerdict.MOVED_ON
+    assert not second.following_own_mission
+
+
+def test_pickup_other_mission(
+    own_game: Game, mission_clock: Callable[[float], None], tmp_path: Path
+) -> None:
+    game, _ = loaded_followed_at(own_game, mission_clock, tmp_path / "a.retribution")
+    record = game.live
+    c = snapshot("boot-c", 1, "Uzi 1-1", minute=12)
+
+    refused = record.pick_up(c, view(c, 10.0))
+
+    assert refused.decided and not refused.picked
+    assert refused.reason == "another mission is running"
+    assert not record.awaiting_pickup
+    assert record.decide(c) is MissionVerdict.FOREIGN
+    assert (
+        companion_status(LinkStatus.RECEIVING, c, False, record.current_verdict)
+        == f"Companion: another mission is running{CONTINUE}"
+    )
+
+
+def test_pickup_view_of_another_mission_undecided(
+    own_game: Game, mission_clock: Callable[[float], None], tmp_path: Path
+) -> None:
+    """Review Focus 3: the spawns describe another mission than the snapshot
+    (the mission changed between the two): nothing decided, the gate stays."""
+    game, a = loaded_followed_at(own_game, mission_clock, tmp_path / "a.retribution")
+    record = game.live
+    b = snapshot("boot-b", 1)
+    record.receive(EventBatch((entry(11, "boot-a", 1),), through=11))
+
+    undecided = record.pick_up(a, view(b, 1010.0))
+
+    assert not undecided.decided
+    assert record.awaiting_pickup
+    assert record.ready() == [] and record.has_held
+    assert record.pick_up(a, view(a, 1010.0)).picked
+    assert record.decide(a) is MissionVerdict.OWN
+    assert [e.seq for e in record.ready()] == [11]
+
+
+def test_save_while_awaiting_keeps_saved_at(
+    own_game: Game, mission_clock: Callable[[float], None], tmp_path: Path
+) -> None:
+    """Review Focus 4: a save while the pick-up is awaited or after it refused
+    keeps where the save stood, so loading it again gives the same answer."""
+    game, a = loaded_followed_at(own_game, mission_clock, tmp_path / "a.retribution")
+    record = game.live
+    stood = SavedAt(("boot-a", 1), 1000.0, 4)
+    record.spawn_asked(9)
+
+    record.mark_saved(5.0)
+    assert record.saved_at == stood
+    mission_clock(5.0)
+    record = save_and_load(game, tmp_path / "b.retribution").live
+    assert record.saved_at == stood
+
+    assert not record.pick_up(a, view(a, 1301.0)).picked
+    record.decide(a)
+    record.mark_saved(5.0)
+    assert record.saved_at == stood
+    again = save_and_load(game, tmp_path / "c.retribution").live
+    assert again.saved_at == stood
+
+    refused = again.pick_up(a, view(a, 1400.0))
+    assert refused.reason == "the server's mission is 6 minutes past this save"
+    assert again.decide(a) is MissionVerdict.MOVED_ON
+
+
+def test_entries_wait_for_pickup(
+    own_game: Game, mission_clock: Callable[[float], None], tmp_path: Path
+) -> None:
+    """Review Focus 1: the save's verdict for the running mission is OWN, but
+    nothing of it is applied before the pick-up passes; when it refuses, its
+    entries are dropped."""
+    game, a = loaded_followed_at(own_game, mission_clock, tmp_path / "a.retribution")
+    record = game.live
+    assert record.verdict_of(("boot-a", 1)) is MissionVerdict.OWN
+    record.receive(
+        EventBatch(tuple(entry(s, "boot-a", 1) for s in (11, 12, 13)), through=13)
+    )
+    assert record.ready() == []
+    assert record.decide(a) is MissionVerdict.OWN
+    assert record.ready() == []
+    assert not record.following_own_mission
+    timed = replace(a, abs_time=datetime(2015, 6, 1, 9, 0), packed=b"a")
+    assert not record.keep(timed)
+
+    assert not record.pick_up(a, view(a, 1301.0)).picked
+
+    assert record.ready() == []
+    assert record.cursor == 13 and not record.has_held
+
+
+def test_slice_two_save_never_picks_up() -> None:
+    """A save from before the pick-up (slice 2) does not know where it stood:
+    even its own mission is not picked up."""
+    record = LiveRecord()
+    marker = MARKER_PREFIX + record.new_marker()
+    record.written(LiveUnitMap())
+    a = snapshot("boot-a", 1, marker, minute=12)
+    assert record.decide(a) is MissionVerdict.OWN
+    for name in ("saved_at", "last_spawn", "moved_on_reason", "mission_file"):
+        del record.__dict__[name]
+
+    assert not record.awaiting_pickup, "a new record awaits nothing"
+
+    loaded = cast(LiveRecord, pickle.loads(pickle.dumps(record)))
+
+    assert loaded.awaiting_pickup
+    assert loaded.saved_at == SavedAt(None, None, None)
+    assert loaded.mission_file is None and loaded.moved_on_reason is None
+    refused = loaded.pick_up(a, view(a, 10.0))
+    assert refused == PickUp(True, False, 0.0, "another mission is running")
+    loaded.decide(a)
+    assert not loaded.following_own_mission
+    assert (
+        companion_status(
+            LinkStatus.RECEIVING,
+            a,
+            False,
+            loaded.current_verdict,
+            reason=loaded.moved_on_reason,
+        )
+        == f"Companion: another mission is running{CONTINUE}"
+    )
+
+
+def test_dynamic_mission_path(saved_games: Path) -> None:
+    at = datetime(2026, 11, 24, 21, 30)
+    missions = saved_games / "Missions"
+
+    first = persistency.dynamic_mission_path(at)
+    assert first == missions / "retribution_dynamic_20261124_2130.miz"
+    missions.mkdir(exist_ok=True)
+    first.write_bytes(b"")
+    second = persistency.dynamic_mission_path(at)
+    assert second == missions / "retribution_dynamic_20261124_2130_2.miz"
+    second.write_bytes(b"")
+    assert persistency.dynamic_mission_path(at) == (
+        missions / "retribution_dynamic_20261124_2130_3.miz"
+    )
+
+
+def test_status_lines() -> None:
+    own = snapshot("a", 1, minute=12)
+    one = snapshot("a", 1, minute=1)
+    file = "retribution_dynamic_20261124_2130.miz"
+    status = companion_status
+    receiving = LinkStatus.RECEIVING
+    OWN, MOVED_ON = MissionVerdict.OWN, MissionVerdict.MOVED_ON
+
+    assert (
+        status(receiving, own, False, OWN, loading=file)
+        == f"Companion: loading {file} on the server…"
+    )
+    assert (
+        status(LinkStatus.LINKED, None, False, None, load_failed=file)
+        == f"Companion: {file} was not loaded on the server; Continue to try again"
+    )
+    assert (
+        status(receiving, own, False, OWN, note=picked_up_note(239.0))
+        == f"{STATUS_TIME}\nPicked up the running mission, 3 minutes after the save"
+    )
+    assert (
+        status(receiving, one, False, OWN, note=picked_up_note(60.0))
+        == "DCS Companion time: 1 minute\n"
+        "Picked up the running mission, 1 minute after the save"
+    )
+    assert picked_up_note(59.0) == (
+        "Picked up the running mission, 0 minutes after the save"
+    )
+    for reason in (
+        "the server's mission is 5 minutes past this save",
+        "the server's mission has 2 flights this save never launched",
+        "the server's mission has 1 flight this save never launched",
+    ):
+        assert (
+            status(receiving, own, False, MOVED_ON, reason=reason)
+            == f"Companion: {reason}{CONTINUE}"
+        )
+    assert (
+        status(receiving, own, False, MissionVerdict.FOREIGN)
+        == f"Companion: another mission is running{CONTINUE}"
+    )
+    assert (
+        status(receiving, own, False, MissionVerdict.OWN_AGAIN)
+        == "Companion: the campaign's mission was loaded again from its start; "
+        "Continue to load it as it stood"
+    )
+    assert (
+        status(receiving, own, False, None, awaiting=True)
+        == "Companion: waiting for the command port to check the running mission"
+    )
+    assert status(receiving, own, False, OWN) == STATUS_TIME
 
 
 # Losses applied: entries of the campaign's own mission, applied as a turn
