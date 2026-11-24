@@ -29,10 +29,17 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QWidget  # noqa: E402
 
 from game import persistency  # noqa: E402
 from game.ato.flight import Flight  # noqa: E402
+from game.companionlink.commands import SpawnsView  # noqa: E402
+from game.companionlink.eventlog import EventBatch  # noqa: E402
 from game.companionlink.launching import due_flights  # noqa: E402
 from game.companionlink.livestate import LiveStateContext  # noqa: E402
-from game.companionlink.liverecord import MARKER_PREFIX  # noqa: E402
+from game.companionlink.liverecord import (  # noqa: E402
+    MARKER_PREFIX,
+    MissionVerdict,
+    SavedAt,
+)
 from game.companionlink.liveunitmap import LiveUnitMap  # noqa: E402
+from game.companionlink.snapshot import parse_snapshot  # noqa: E402
 from game.game import Game  # noqa: E402
 from game.server import EventStream  # noqa: E402
 from game.sim import GameUpdateEvents  # noqa: E402
@@ -206,10 +213,11 @@ def state(
     boot: str = "b1",
     own: bool = True,
     start: Optional[datetime] = None,
+    model_time: Optional[float] = None,
 ) -> str:
     """A snapshot of the mission `boot` at its `minute`, the mission started at
-    `start` (default 1 June 2015, 08:00); the campaign's own carries its
-    marker."""
+    `start` (default 1 June 2015, 08:00), its model time `model_time` (default
+    the minute's); the campaign's own carries its marker."""
     statics = [{"name": MARKER_PREFIX + str(game.live.marker), "id": 9000}]
     at = (start or datetime(2015, 6, 1, 8, 0)) + timedelta(minutes=minute)
     midnight = datetime(at.year, at.month, at.day)
@@ -218,7 +226,7 @@ def state(
             "minute": minute,
             "boot": boot,
             "session": 1,
-            "modelTime": 60.0 * minute,
+            "modelTime": 60.0 * minute if model_time is None else model_time,
             "state": {
                 "meta": {
                     "date": {"Year": at.year, "Month": at.month, "Day": at.day},
@@ -1344,3 +1352,270 @@ def test_quit_normal_campaign_no_dynamic_autosave(
     assert [b[1] for b in boxes.shown] == ["Quit Retribution?"]
     assert not persistency.dynamic_autosave_path().exists()
     assert autosave_lines(caplog) == []
+
+
+# The pick-up: a loaded save follows the running mission only when it is the
+# save's own, has not run on more than five minutes and holds no spawn the
+# save does not know.
+
+#: The status while the pick-up waits for the command port.
+AWAITING = "Companion: waiting for the command port to check the running mission"
+
+
+class FollowedSave:
+    """A save of the `game` fixture's game, made while it followed its mission
+    `b1`/1 at model time 1000: `LIVE 1` launched into it as spawn `s-4`,
+    another flight planned and due, the event log's cursor at 0."""
+
+    def __init__(self, game: Game, path: Path) -> None:
+        live = game.live
+        planned = plan_by_hand(game, 2)
+        #: The mission's start: both flights are due from it.
+        self.start = planned.flight_plan.startup_time()
+        running = parse_snapshot(state(game, 16, start=self.start, model_time=1000.0))
+        live.receive(EventBatch((), through=0))
+        assert live.decide(running) is MissionVerdict.OWN
+        flight = launched_flight(game)
+        assert flight.flight_plan.startup_time() <= self.start
+        live.spawn_asked(4)
+        clock = LiveStateContext.clock()
+        clock.update(running, 0.0)
+        clock.hold(0.0)
+        try:
+            self.game = save_and_load(game, path)
+        finally:
+            LiveStateContext.set(None)
+        assert self.game.live.awaiting_pickup
+        assert self.game.live.saved_at == SavedAt(("b1", 1), 1000.0, 4)
+        [self.launched] = [f for f in ato_flights(self.game) if f.launched]
+        [self.planned] = [f for f in ato_flights(self.game) if not f.launched]
+
+    def running(self, minute: int, model_time: float) -> str:
+        """The snapshot of the saved mission at `minute`, its model time
+        `model_time`."""
+        return event(
+            "state",
+            state(self.game, minute, start=self.start, model_time=model_time),
+        )
+
+
+@pytest.fixture
+def followed_save(game: Game, tmp_path: Path) -> FollowedSave:
+    return FollowedSave(game, tmp_path / "followed.retribution")
+
+
+def launcher_on(w: Window, game: Game) -> FlightLauncher:
+    """A launcher on the window's link for `game`, following each spawn up to
+    30 s."""
+    launcher = FlightLauncher(w.link)
+    launcher.confirm_warn_s = launcher.confirm_cap_s = 30.0
+    launcher.confirm_poll_s = 0.05
+    launcher.set_game(game)
+    return launcher
+
+
+def test_pickup_within_five_minutes(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[..., Window],
+    followed_save: FollowedSave,
+    commands: FakeCommands,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(flightlauncher, "CHECK_INTERVAL_MS", 3_600_000)
+    use_commands(monkeypatch, commands)
+    commands.spawns = [(4, "LIVE 1", "spawned"), (5, "Other 1", "failed")]
+    commands.spawns_mission = ("b1", 1, 1180.0)
+    commands.statuses = ["waiting"]
+    loaded = followed_save.game
+    fake = serve([followed_save.running(3, 1180.0)])
+    with fake.lock:
+        fake.entries.append(plane(1, "dead", "LIVE 1-1"))
+
+    w = window(fake, loaded)
+    launcher = launcher_on(w, loaded)
+    try:
+        w.wait_for(lambda: following(loaded) and "LIVE 1-1" in loaded.live.dead)
+        assert w.link.status_text() == (
+            "DCS Companion time: 3 minutes\n"
+            "Picked up the running mission, 3 minutes after the save"
+        )
+        assert w.link.pickup_note == (
+            "Picked up the running mission, 3 minutes after the save"
+        )
+        assert loaded.live.cursor == 1
+        assert "Pick-up: picked up boot b1 session 1, 180 s after the save" in (
+            r.getMessage() for r in caplog.records
+        )
+        assert len(commands.lists) == 1, "the check asks once"
+
+        w.wait_for(lambda: launcher.receiving)
+        launcher.check()
+        w.wait_for(lambda: len(commands.requests) == 1)
+        launcher.check()
+        w.pump()
+        [(sent, _)] = commands.requests
+        names = [u["name"] for u in sent["group"]["units"].values()]
+        assert loaded.live.name_map.flight_units(followed_save.planned) == names
+        launched = followed_save.launched
+        assert launched.launched and launched.live_group_name == "LIVE 1"
+        assert not launcher.is_busy(launched)
+    finally:
+        with commands.lock:
+            commands.statuses = ["failed"]  # the worker ends
+        launcher.stop()
+
+
+def test_pickup_refused_too_late(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[..., Window],
+    followed_save: FollowedSave,
+    commands: FakeCommands,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(flightlauncher, "CHECK_INTERVAL_MS", 3_600_000)
+    use_commands(monkeypatch, commands)
+    commands.spawns = [(4, "LIVE 1", "spawned")]
+    commands.spawns_mission = ("b1", 1, 1400.0)
+    loaded = followed_save.game
+    fake = serve([followed_save.running(3, 1400.0)])
+    with fake.lock:
+        fake.entries.append(plane(1, "dead", "LIVE 1-1"))
+
+    w = window(fake, loaded)
+    launcher = launcher_on(w, loaded)
+    try:
+        w.wait_for(lambda: loaded.live.cursor == 1 and launcher.receiving)
+        assert w.link.status_text() == (
+            "Companion: the server's mission is 6 minutes past this save; "
+            "Continue to load the campaign's mission"
+        )
+        assert w.link.pickup_note is None
+        assert not following(loaded) and not loaded.live.awaiting_pickup
+        assert "LIVE 1-1" not in loaded.live.dead
+        assert LiveStateContext.get() is None, "the mission is not drawn"
+        assert w.live_maps() == []
+
+        launcher.check()
+        w.pump()
+        assert commands.requests == []
+        assert not followed_save.planned.launched
+    finally:
+        launcher.stop()
+
+
+def test_pickup_waits_for_command_port(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[..., Window],
+    followed_save: FollowedSave,
+    commands: FakeCommands,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    use_commands(monkeypatch, commands)
+    commands.spawns = [(4, "LIVE 1", "spawned")]
+    commands.spawns_mission = ("b1", 1, 1180.0)
+    assert commands.server is not None
+    port = commands.server.server_address[1]
+    commands.close()  # the companion restarting
+    loaded = followed_save.game
+    gate = threading.Event()
+    fake = serve(
+        [
+            followed_save.running(3, 1180.0),
+            gate,
+            followed_save.running(4, 1240.0),
+        ]
+    )
+    with fake.lock:
+        fake.entries.append(plane(1, "dead", "LIVE 1-1"))
+
+    w = window(fake, loaded)
+    w.wait_for(lambda: w.link.status_text() == AWAITING)
+    assert not following(loaded) and loaded.live.awaiting_pickup
+    assert LiveStateContext.get() is None
+    w.wait_for(lambda: loaded.live.has_held)
+    w.pump()
+    assert loaded.live.cursor == 0 and "LIVE 1-1" not in loaded.live.dead
+
+    commands.start(port)
+    gate.set()
+    w.wait_for(lambda: following(loaded) and "LIVE 1-1" in loaded.live.dead)
+    assert w.link.status_text() == (
+        "DCS Companion time: 4 minutes\n"
+        "Picked up the running mission, 3 minutes after the save"
+    )
+    assert len(commands.lists) == 1
+
+
+def test_spawn_confirmed_into_moved_on_mission(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[..., Window],
+    game: Game,
+    commands: FakeCommands,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A spawn sent into the campaign's mission, confirmed after a pick-up
+    check refused that mission, leaves its flight not launched: it launches
+    again into the campaign's next mission."""
+    caplog.set_level(logging.INFO)
+    use_commands(monkeypatch, commands)
+    commands.statuses = ["waiting"]  # accepted, not confirmed yet
+    flight = plan_by_hand(game, 2)
+    start = flight.flight_plan.startup_time()  # due from the first snapshot
+
+    moved_gate, next_gate = threading.Event(), threading.Event()
+    script: list[Item] = [
+        event("state", state(game, 1, start=start)),
+        moved_gate,
+        event("state", state(game, 2, start=start)),
+        next_gate,
+        "",  # the campaign's next mission, under its new marker
+    ]
+    w = window(serve(script))
+    launcher = launcher_on(w, game)
+    ended: list[tuple[Flight, str]] = []
+    launcher.launch_failed.connect(lambda f, message: ended.append((f, message)))
+    try:
+        w.wait_for(lambda: following(game) and launcher.receiving)
+        launcher.launch_now(flight)
+        w.wait_for(lambda: len(commands.requests) == 1)
+
+        # The check refuses the running mission: it has run on 400 s.
+        running = LiveStateContext.get()
+        assert running is not None
+        game.live.mark_saved(60.0)
+        refused = game.live.pick_up(
+            running, SpawnsView(running.boot, running.session, 460.0, ())
+        )
+        assert refused.decided and not refused.picked
+        moved_gate.set()
+        w.wait_for(lambda: "past this save" in w.link.status_text())
+        assert game.live.current_verdict is MissionVerdict.MOVED_ON
+        with commands.lock:
+            commands.statuses = ["spawned"]
+        w.wait_for(lambda: not launcher.is_busy(flight))
+
+        assert flight.launched is False
+        assert flight.live_group_name is None
+        said = (
+            f"{flight} spawned after the campaign's mission stopped being "
+            "followed; it launches again"
+        )
+        assert f"Launch: {said}" in [r.getMessage() for r in caplog.records]
+        assert ended == [(flight, said)]
+
+        with commands.lock:
+            commands.statuses = ["waiting"]
+        game.live.new_marker()  # as Continue writes the campaign's mission
+        script[4] = event("state", state(game, 1, boot="b2", start=start))
+        next_gate.set()
+        w.wait_for(lambda: len(commands.requests) == 2)
+        names = [u["name"] for u in commands.requests[1][0]["group"]["units"].values()]
+        assert game.live.name_map.flight_units(flight) == names
+        with commands.lock:
+            commands.statuses = ["spawned"]
+        w.wait_for(lambda: flight.launched)
+    finally:
+        launcher.stop()

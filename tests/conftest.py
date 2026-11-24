@@ -356,7 +356,9 @@ class FakeCommands:
         self.server: Optional[ThreadingHTTPServer] = None
         self.thread: Optional[threading.Thread] = None
 
-    def start(self) -> None:
+    def start(self, port: int = 0) -> None:
+        """Serves on `port` (0: any free one); started again after `close`
+        on the same port, the companion is back."""
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -494,7 +496,7 @@ class FakeCommands:
                 self.end_headers()
                 self.wfile.write(raw)
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         self.server = server
         self.thread = threading.Thread(
             target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True

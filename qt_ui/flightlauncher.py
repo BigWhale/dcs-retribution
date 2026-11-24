@@ -12,10 +12,11 @@ as the request goes out, so its losses are debriefed even before the spawn
 is confirmed; a launch tried again replaces them. Nothing is launched while
 the running mission is not the campaign's own
 (`game.live.following_own_mission`), and a spawn confirmed while the current
-mission is another's (decided foreign) leaves its flight not launched
-(`launch_failed`, not failed): it launches again once the campaign's mission
-is followed. So does a spawn confirmed after the mission it was sent into
-stopped being the campaign's (a restore retired it), even while the link is
+mission is decided not followed (another's, the campaign's loaded again from
+its start, or one a loaded save did not pick up) leaves its flight not
+launched (`launch_failed`, not failed): it launches again once the campaign's
+mission is followed. So does a spawn confirmed after the mission it was sent
+into stopped being followed (a restore retired it), even while the link is
 lost or stale. A spawn confirmed while the link is merely lost or stale, in a
 mission still the campaign's, is launched: the mission may still be running,
 and launching it again could put a second group in it.
@@ -94,7 +95,6 @@ from game.companionlink.flightspawn import (
 )
 from game.companionlink.launching import due_flights
 from game.companionlink.linkstatus import LinkStatus
-from game.companionlink.liverecord import MissionVerdict
 from game.companionlink.livestate import LiveStateContext
 from game.companionlink.parking import ParkingClaims, ParkingPlan, plan_parking
 from game.companionlink.snapshot import LiveSnapshot
@@ -508,15 +508,18 @@ class FlightLauncher(QObject):
             return
         game = self._game
         into = self._sent_into.pop(flight, None)
-        if game is not None and MissionVerdict.FOREIGN in (
-            game.live.current_verdict,
-            game.live.verdict_of(into) if into is not None else None,
+        if game is not None and any(
+            verdict is not None and not verdict.followed
+            for verdict in (
+                game.live.current_verdict,
+                game.live.verdict_of(into) if into is not None else None,
+            )
         ):
-            # Not the campaign's mission, or the one it was sent into is no
-            # longer the campaign's (retired by a restore): the flight launches
-            # again when the campaign's is followed. Its names, mapped at send,
-            # are replaced by that launch. Not failed, so it is due again; the
-            # signal ends the launch on screen.
+            # Not a mission followed, or the one it was sent into is no
+            # longer followed (retired by a restore, not picked up): the flight
+            # launches again when the campaign's is followed. Its names, mapped
+            # at send, are replaced by that launch. Not failed, so it is due
+            # again; the signal ends the launch on screen.
             self._end_launch(flight)
             self._sent_as.pop(flight, None)
             message = (
