@@ -6,8 +6,10 @@ it is due, or `409` when a spawn of the mission still holds the name.
 `GET /v1/spawns` lists the mission's spawns (whose names are held while one is
 `waiting`, `unknown` or `spawned`), `GET /v1/spawns/{id}` gives one spawn's
 record, whose `status` tells what became of it. `POST /v1/despawn` removes a group of the mission
-now (`200` with its `units`, `404` when there is no such group). Errors come as `{"error": "..."}` with a fitting
-status; a wrong token is `401`.
+now (`200` with its `units`, `404` when there is no such group).
+`POST /v1/mission/load` asks the server to load a mission from its `Missions/`
+(`202`; the load itself is not awaited). Errors come as `{"error": "..."}` with
+a fitting status; a wrong token is `401`.
 
 Every call blocks (the launcher runs them on a worker thread) and fails with
 `CommandError`, whose message never holds the token.
@@ -17,11 +19,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
 import httpx
+
+from game.companionlink.linkstatus import LinkStatus
 
 log = logging.getLogger("game.companionlink")
 
@@ -30,6 +35,19 @@ _FINAL_FAILED = ("failed", "despawned")
 #: A spawn's statuses that hold its name in the mission: the companion
 #: refuses another spawn of that name (`409`).
 _HOLDING = ("waiting", "unknown", "spawned")
+#: A spawn's id: `s-` and its number.
+_SPAWN_ID = re.compile(r"s-([0-9]+)")
+
+
+@dataclass(frozen=True)
+class SpawnsView:
+    """`GET /v1/spawns`: the mission the companion saw last and its spawns."""
+
+    boot: str
+    session: int
+    model_time: float
+    #: Each spawn's id number (`s-12` is 12) and status, in id order.
+    spawns: tuple[tuple[int, str], ...]
 
 
 @dataclass(frozen=True)
@@ -167,6 +185,75 @@ class CompanionCommands:
             and s.get("status") in _HOLDING
             and isinstance(s.get("name"), str)
         )
+
+    def spawns(self) -> SpawnsView:
+        """The mission's spawns as the companion sees them (`GET /v1/spawns`).
+
+        Raises CommandError when the companion cannot be asked, refuses, or
+        answers with something that is not the spawns' view.
+        """
+        resp = self._send("GET", "/v1/spawns")
+        if resp.status_code != 200:
+            raise self._refusal(resp, quiet=True)
+        body = self._json(resp)
+        boot = body.get("boot")
+        session = body.get("session")
+        model_time = body.get("modelTime")
+        spawns = body.get("spawns")
+        if (
+            not isinstance(boot, str)
+            or not isinstance(session, int)
+            or isinstance(session, bool)
+            or not isinstance(model_time, (int, float))
+            or isinstance(model_time, bool)
+            or not isinstance(spawns, list)
+        ):
+            raise CommandError(resp.status_code, "the spawns answer is not a view")
+        entries: list[tuple[int, str]] = []
+        for s in spawns:
+            spawn_id = s.get("id") if isinstance(s, dict) else None
+            status = s.get("status") if isinstance(s, dict) else None
+            found = _SPAWN_ID.fullmatch(spawn_id) if isinstance(spawn_id, str) else None
+            if found is None or not isinstance(status, str):
+                raise CommandError(
+                    resp.status_code,
+                    "the spawns answer has a spawn without id or status",
+                )
+            entries.append((int(found.group(1)), status))
+        return SpawnsView(boot, session, float(model_time), tuple(entries))
+
+    def load_mission(self, file: str) -> None:
+        """Asks the companion to load `file` from the server's `Missions/`.
+
+        Returns once the companion has asked the hook (`202`); the load itself
+        follows, seen as a new session. Any other answer (`400` bad name, `404`
+        no such file, `502` refused by the hook, `503` link down, `504` no
+        answer in time) or no answer raises CommandError with the companion's
+        text.
+        """
+        resp = self._send(
+            "POST",
+            "/v1/mission/load",
+            content=json.dumps({"file": file}, separators=(",", ":")).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        if resp.status_code != 202:
+            raise self._refusal(resp)
+        log.info("companion mission load asked: %s", file)
+
+    def reachable(self) -> LinkStatus:
+        """Whether the command port answers (`GET /v1/spawns`): LINKED on 200,
+        REFUSED when it refuses the token (401), WAITING otherwise or when it
+        does not answer at all."""
+        try:
+            resp = self._send("GET", "/v1/spawns")
+        except CommandError:
+            return LinkStatus.WAITING
+        if resp.status_code == 200:
+            return LinkStatus.LINKED
+        if resp.status_code == 401:
+            return LinkStatus.REFUSED
+        return LinkStatus.WAITING
 
     def spawn_status(self, spawn_id: str) -> str:
         """The spawn's status: waiting, unknown, spawned, failed or despawned."""

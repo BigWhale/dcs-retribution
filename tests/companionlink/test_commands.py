@@ -1,10 +1,11 @@
 """The client of DCS Companion's command port, against a fake companion.
 
 The fake (`FakeCommands`, in conftest) answers `POST /v1/spawn`,
-`GET /v1/spawns`, `GET /v1/spawns/{id}` and `POST /v1/despawn` from a real
-HTTP server on 127.0.0.1 as the companion does (`docs/reference/campaign.md`,
-Command port): `202 {"id":"s-1"}`, the mission's spawns under `spawns`, the
-spawn record under `spawn`, a despawn's `group` and `units`, errors as
+`GET /v1/spawns`, `GET /v1/spawns/{id}`, `POST /v1/despawn` and
+`POST /v1/mission/load` from a real HTTP server on 127.0.0.1 as the companion
+does (`docs/reference/campaign.md`, Command port): `202 {"id":"s-1"}`, the
+mission's spawns under `spawns`, the spawn record under `spawn`, a despawn's
+`group` and `units`, a load's `202 {"file","boot","session"}`, errors as
 `{"error": "..."}` and a wrong token `401`.
 """
 
@@ -23,8 +24,10 @@ from game.companionlink.commands import (
     SpawnFailed,
     SpawnPending,
     SpawnRequest,
+    SpawnsView,
     despawn_and_spawn,
 )
+from game.companionlink.linkstatus import LinkStatus
 from tests.conftest import COMMAND_TOKEN as TOKEN
 from tests.conftest import FakeCommands
 
@@ -194,11 +197,11 @@ def test_despawn_failure_stops_before_spawn(
 def test_held_names_round_trip(fake: FakeCommands) -> None:
     """The names the companion holds: its spawns waiting, unknown or spawned."""
     fake.spawns = [
-        ("Uzi 1", "spawned"),
-        ("Uzi 2", "waiting"),
-        ("Uzi 3", "unknown"),
-        ("Uzi 4", "failed"),
-        ("Uzi 5", "despawned"),
+        (1, "Uzi 1", "spawned"),
+        (2, "Uzi 2", "waiting"),
+        (3, "Uzi 3", "unknown"),
+        (4, "Uzi 4", "failed"),
+        (5, "Uzi 5", "despawned"),
     ]
 
     held = CompanionCommands(fake.address, TOKEN).held_names()
@@ -225,3 +228,50 @@ def test_spawn_refused_after_despawn_says_so(fake: FakeCommands) -> None:
         "the parked spares 'Spare 1', 'Spare 2' were despawned for it"
     )
     assert fake.groups == {}
+
+
+def test_spawns_view(fake: FakeCommands) -> None:
+    """The mission's spawns as the companion sees them: ids and statuses."""
+    fake.spawns = [(3, "Uzi 1", "waiting"), (12, "Uzi 2", "failed")]
+    fake.spawns_mission = ("b", 2, 61.5)
+
+    view = CompanionCommands(fake.address, TOKEN).spawns()
+
+    assert view == SpawnsView("b", 2, 61.5, ((3, "waiting"), (12, "failed")))
+    assert fake.lists[0]["Authorization"] == f"Bearer {TOKEN}"
+
+
+def test_load_mission_round_trip(fake: FakeCommands) -> None:
+    CompanionCommands(fake.address, TOKEN).load_mission("camp.miz")
+
+    assert fake.loads == ["camp.miz"]
+
+
+def test_load_mission_refused(
+    fake: FakeCommands, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="game.companionlink")
+    fake.load_refuse = (404, "load_mission: no such file camp.miz")
+
+    with pytest.raises(CommandError) as refused:
+        CompanionCommands(fake.address, TOKEN).load_mission("camp.miz")
+
+    assert refused.value.status == 404
+    assert refused.value.message == "load_mission: no such file camp.miz"
+    assert str(refused.value) == (
+        "the companion answered 404: load_mission: no such file camp.miz"
+    )
+    assert TOKEN not in str(refused.value)
+    assert TOKEN not in caplog.text
+
+
+def test_reachable(fake: FakeCommands) -> None:
+    """The command port answers (linked), refuses the token, or is not there."""
+    assert CompanionCommands(fake.address, TOKEN).reachable() is LinkStatus.LINKED
+    assert CompanionCommands(fake.address, "bad").reachable() is LinkStatus.REFUSED
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    closed = CompanionCommands(f"http://127.0.0.1:{port}", TOKEN, timeout=1.0)
+    assert closed.reachable() is LinkStatus.WAITING

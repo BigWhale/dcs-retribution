@@ -5,8 +5,9 @@ The link fake (`FakeCompanion`) serves `GET /v1/hello`, `GET /v1/stream` and
 `GET /v1/events` from a real HTTP server on 127.0.0.1, one script per stream
 connection, with the field names of the companion's minute snapshots and of
 its event log. The command fake (`FakeCommands`) answers `POST /v1/spawn`,
-`GET /v1/spawns`, `GET /v1/spawns/{id}` and `POST /v1/despawn` as the
-companion does (`docs/reference/campaign.md`, Command port).
+`GET /v1/spawns`, `GET /v1/spawns/{id}`, `POST /v1/despawn` and
+`POST /v1/mission/load` as the companion does (`docs/reference/campaign.md`,
+Command port).
 
 A game is generated from a campaign shipped with Retribution, created as the
 new game wizard does: the flag first, then `begin_turn_0`.
@@ -322,7 +323,8 @@ COMMAND_TOKEN = "tok-c"
 
 
 class FakeCommands:
-    """The companion's command port: spawn requests and their records."""
+    """The companion's command port: spawn requests and their records, and
+    mission loads."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -338,10 +340,16 @@ class FakeCommands:
         self.despawn_refuse: Optional[int] = None
         #: The bodies and headers of POST /v1/despawn, in order.
         self.despawns: list[tuple[dict[str, Any], dict[str, str]]] = []
-        #: The spawns GET /v1/spawns lists, as (name, status).
-        self.spawns: list[tuple[str, str]] = []
+        #: The spawns GET /v1/spawns lists, as (id number, name, status).
+        self.spawns: list[tuple[int, str, str]] = []
+        #: The mission GET /v1/spawns describes: (boot, session, modelTime).
+        self.spawns_mission: tuple[str, int, float] = ("b1", 1, 2401.2)
         #: The headers of GET /v1/spawns, in order.
         self.lists: list[dict[str, str]] = []
+        #: The files POST /v1/mission/load was asked for, in order.
+        self.loads: list[str] = []
+        #: The answer to every POST /v1/mission/load, or None for 202.
+        self.load_refuse: Optional[tuple[int, str]] = None
         self.server: Optional[ThreadingHTTPServer] = None
         self.thread: Optional[threading.Thread] = None
 
@@ -364,6 +372,9 @@ class FakeCommands:
                     return
                 if self.path == "/v1/despawn":
                     self.despawn(json.loads(raw))
+                    return
+                if self.path == "/v1/mission/load":
+                    self.load_mission(json.loads(raw))
                     return
                 if self.path != "/v1/spawn":
                     self.answer(404, {"error": "not found"})
@@ -413,22 +424,37 @@ class FakeCommands:
             def list_spawns(self) -> None:
                 with fake.lock:
                     fake.lists.append(dict(self.headers))
+                    boot, session, model_time = fake.spawns_mission
                     spawns = [
                         {
                             "id": f"s-{i}",
                             "name": name,
                             "country": 2,
                             "category": "plane",
-                            "mission": {"boot": "b1", "session": 1},
+                            "mission": {"boot": boot, "session": session},
                             "status": status,
                             "asked": "2026-11-22T09:14:00.000Z",
                         }
-                        for i, (name, status) in enumerate(fake.spawns, start=1)
+                        for i, name, status in fake.spawns
                     ]
                 self.answer(
                     200,
-                    {"boot": "b1", "session": 1, "modelTime": 2401.2, "spawns": spawns},
+                    {
+                        "boot": boot,
+                        "session": session,
+                        "modelTime": model_time,
+                        "spawns": spawns,
+                    },
                 )
+
+            def load_mission(self, body: dict[str, Any]) -> None:
+                with fake.lock:
+                    fake.loads.append(str(body.get("file")))
+                    refuse = fake.load_refuse
+                if refuse is not None:
+                    self.answer(refuse[0], {"error": refuse[1]})
+                    return
+                self.answer(202, {"file": body.get("file"), "boot": "b1", "session": 1})
 
             def despawn(self, body: dict[str, Any]) -> None:
                 with fake.lock:
