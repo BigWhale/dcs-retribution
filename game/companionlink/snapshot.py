@@ -38,6 +38,12 @@ class LiveUnit:
     speed: float  # m/s
     in_air: bool
     player: Optional[str]
+    #: Planes and helicopters: a fraction of internal fuel, over 1 with fuel
+    #: in external tanks; None when the tick has none.
+    fuel: Optional[float] = None
+    #: Planes and helicopters: (DCS weapon type, count) per weapon; None when
+    #: the tick has none, which means the unit carries none.
+    ammo: Optional[tuple[tuple[str, int], ...]] = None
 
 
 @dataclass(frozen=True)
@@ -222,6 +228,7 @@ def _group_units(g: Any) -> list[LiveUnit]:
     units = g.get("units") or []
     if not isinstance(units, list):
         raise ValueError(f"group {name}: units is not a list")
+    aircraft = category in ("plane", "helicopter")
     out: list[LiveUnit] = []
     for u in units:
         try:
@@ -242,11 +249,29 @@ def _group_units(g: Any) -> list[LiveUnit]:
                     speed=_number(u.get("spd")) or 0.0,
                     in_air=u.get("inAir") is True,
                     player=player if isinstance(player, str) and player else None,
+                    fuel=_number(u.get("fuel")) if aircraft else None,
+                    ammo=_ammo(u.get("ammo")) if aircraft else None,
                 )
             )
         except (KeyError, TypeError, ValueError) as e:
             log.debug("companion snapshot: unit of group %s skipped: %s", name, e)
     return out
+
+
+def _ammo(v: Any) -> Optional[tuple[tuple[str, int], ...]]:
+    """A unit's `ammo` as (weapon type, count) pairs; None when it is not a
+    list. An entry that is not a [str, int] pair is skipped."""
+    if not isinstance(v, list):
+        return None
+    return tuple(
+        (w[0], w[1])
+        for w in v
+        if isinstance(w, list)
+        and len(w) == 2
+        and isinstance(w[0], str)
+        and isinstance(w[1], int)
+        and not isinstance(w[1], bool)
+    )
 
 
 def _static(s: Any) -> Optional[LiveUnit]:

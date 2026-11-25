@@ -383,6 +383,7 @@ def snapshot_of(
     boot: str = "b1",
     moved: Mapping[str, tuple[float, float, float]] = {},
     in_air: frozenset[str] | set[str] = frozenset(),
+    air: Mapping[str, Mapping[str, Any]] = {},
     gone: frozenset[str] | set[str] = frozenset(),
     extra: Sequence[dict[str, Any]] = (),
     launched: Sequence[Flight] = (),
@@ -392,10 +393,11 @@ def snapshot_of(
     `boot` (session 1) at `at` (by default 37 min 42 s after its start).
 
     Each group's and static's unit stands where the mission put it, or at
-    `moved[name]` (x, y, heading); a unit named in `in_air` flies, one named
-    in `gone` is missing. The `extra` groups are added as given. Launched
-    flights are added as plane groups under their live names, at their
-    departure, without the names counted dead.
+    `moved[name]` (x, y, heading); a unit named in `in_air` flies, `air[name]`
+    is merged into its unit (any of `x`, `y`, `alt`, `hdg`, `spd`, `fuel`,
+    `ammo`, `inAir`), one named in `gone` is missing. The `extra` groups are
+    added as given. Launched flights are added as plane groups under their
+    live names, at their departure, without the names counted dead.
     """
     start = game.conditions.start_time
     if at is None:
@@ -406,6 +408,7 @@ def snapshot_of(
         unit = dict(unit, inAir=unit["name"] in in_air)
         if unit["name"] in moved:
             unit["x"], unit["y"], unit["hdg"] = moved[unit["name"]]
+        unit.update(air.get(unit["name"], {}))
         return unit
 
     state_groups = [
@@ -521,7 +524,9 @@ def launch(game: Game, flight: Flight, name: str) -> None:
     """The flight launched into the running mission as the group `name`."""
     flight.launched = True
     flight.live_group_name = name
-    game.live.name_map.add_launched(flight, [f"{name}-1", f"{name}-2"])
+    game.live.name_map.add_launched(
+        flight, [f"{name}-{i}" for i in range(1, flight.count + 1)]
+    )
 
 
 def test_restore_starts_at_the_minute(
