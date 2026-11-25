@@ -25,6 +25,12 @@ reloaded game follows none until a snapshot decides one, as after a lost
 link. Entries held for a mission not yet decided are not saved; the link
 reads them again from the cursor.
 
+Planning (creating and editing packages and flights) is open only once the
+campaign's own mission is followed (`planning_open`): closed after a load
+and whenever a new mission is about to be written (Begin, Continue), opened
+by the first snapshot of the campaign's own mission decided since. Once
+open it stays open for the session: a lost link does not close it. Not saved.
+
 A loaded game awaits a pick-up check (`pick_up`) before it follows anything:
 its saved verdicts may name a mission that has moved on without it. Until the
 check decides, no entry is handed out and no snapshot kept. The check picks
@@ -168,6 +174,9 @@ class LiveRecord:
         self.mission_file: Optional[str] = None
         #: A loaded game: nothing is followed until the pick-up check decides.
         self.awaiting_pickup = False
+        #: The campaign's own mission has been followed since the load or
+        #: since the newest mission was written: planning is open.
+        self.planning_open = True
         # The pick-up of this load refused the running mission.
         self._pickup_refused = False
         self._pending: list[LogEntry] = []
@@ -177,6 +186,7 @@ class LiveRecord:
         state = self.__dict__.copy()
         del state["current"]
         del state["awaiting_pickup"]
+        del state["planning_open"]
         del state["_pickup_refused"]
         del state["_pending"]
         del state["_told_no_marker"]
@@ -192,14 +202,17 @@ class LiveRecord:
         self.__dict__.update(state)
         self.current = None
         self.awaiting_pickup = True
+        self.planning_open = False
         self._pickup_refused = False
         self._pending = []
         self._told_no_marker = False
 
     def new_marker(self) -> str:
-        """A fresh uuid for the mission about to be written."""
+        """A fresh uuid for the mission about to be written; planning closes
+        until that mission is followed."""
         self.marker = str(uuidlib.uuid4())
         self.written_map = None
+        self.planning_open = False
         return self.marker
 
     def written(self, name_map: LiveUnitMap) -> None:
@@ -208,7 +221,14 @@ class LiveRecord:
 
     def decide(self, snapshot: LiveSnapshot) -> MissionVerdict:
         """The verdict on the snapshot's mission, which becomes the current
-        one; a mission is decided once, by its first snapshot."""
+        one; a mission is decided once, by its first snapshot. Planning opens
+        when the campaign's own mission is followed."""
+        verdict = self._decide(snapshot)
+        if self.following_own_mission:
+            self.planning_open = True
+        return verdict
+
+    def _decide(self, snapshot: LiveSnapshot) -> MissionVerdict:
         pair = (snapshot.boot, snapshot.session)
         self.current = pair
         known = self.verdicts.get(pair)

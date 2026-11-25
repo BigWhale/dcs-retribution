@@ -46,8 +46,8 @@ IN_FLIGHT = "In Flight"
 
 
 def _planning_locked(game_model: GameModel) -> bool:
-    """Whether no package or flight may be created or edited: a dynamic
-    campaign before Begin."""
+    """Whether no package or flight may be created or edited
+    (`qt_ui.dialogs.planning_locked`)."""
     from qt_ui.dialogs import planning_locked
 
     return planning_locked(game_model.game)
@@ -300,7 +300,9 @@ class QFlightPanel(QGroupBox):
         A dynamic campaign's flight that is in flight or on its way there can
         be cloned but neither edited, cancelled nor launched again; Launch is
         shown in a dynamic campaign only, enabled while the link receives.
-        Before a dynamic campaign's Begin, no flight is edited or cloned.
+        While planning is locked (before a dynamic campaign's Begin, and
+        after a load, Begin or Continue until its own mission is followed), no
+        flight is edited or cloned.
         """
         index = self.flight_list.currentIndex()
         enabled = index.isValid()
@@ -622,7 +624,7 @@ class QPackagePanel(QGroupBox):
     def enable_buttons(self, enabled: bool) -> None:
         """Enables the buttons; Cancel/abort not while the selected package
         holds a flight in flight or on its way there, Edit and Clone not
-        before a dynamic campaign's Begin."""
+        while planning is locked."""
         locked = self.package_list.is_locked(self.package_list.currentIndex())
         may_plan = enabled and not _planning_locked(self.game_model)
         self.edit_button.setEnabled(may_plan)
@@ -671,7 +673,8 @@ class QAirTaskingOrderPanel(QSplitter):
 
     def on_launch_changed(self, *_args: object) -> None:
         """A flight's launch began or ended, or a snapshot came: redraws the
-        ATO and its buttons."""
+        ATO and its buttons (the first followed snapshot opens planning after
+        a load, Begin or Continue)."""
         for ato_model in (self.game_model.ato_model, self.game_model.red_ato_model):
             ato_model.on_sim_update(GameUpdateEvents())
         package_model = self.flight_panel.package_model

@@ -16,8 +16,13 @@ from .windows.mission.QPackageDialog import (
 
 def planning_locked(game: Optional[Game]) -> bool:
     """Whether no package or flight may be created or edited: a dynamic
-    campaign before Begin (Begin's own turn pass plans as usual)."""
-    return game is not None and game.dynamic_campaign and game.turn == 0
+    campaign before Begin (Begin's own turn pass plans as usual), and after a
+    load, Begin or Continue until its own mission is followed."""
+    return (
+        game is not None
+        and game.dynamic_campaign
+        and (game.turn == 0 or not game.live.planning_open)
+    )
 
 
 class Dialog:
@@ -46,7 +51,7 @@ class Dialog:
     def open_new_package_dialog(cls, mission_target: MissionTarget, parent=None):
         """Opens the dialog to create a new package with the given target.
 
-        Not in a dynamic campaign before Begin.
+        Not while planning is locked (`planning_locked`).
         """
         if cls._planning_locked():
             return
@@ -59,7 +64,7 @@ class Dialog:
     def open_edit_package_dialog(cls, package_model: PackageModel):
         """Opens the dialog to edit the given package.
 
-        Not in a dynamic campaign before Begin.
+        Not while planning is locked (`planning_locked`).
         """
         if cls._planning_locked():
             return
@@ -72,8 +77,8 @@ class Dialog:
     ) -> None:
         """Opens the dialog to edit the given flight.
 
-        Not in a dynamic campaign before Begin, nor for a dynamic campaign's
-        flight in flight or on its way there.
+        Not while planning is locked (`planning_locked`), nor for a dynamic
+        campaign's flight in flight or on its way there.
         """
         if cls._planning_locked() or flight_locked(flight):
             return

@@ -1376,3 +1376,43 @@ def test_spawn_confirmed_into_moved_on_mission(
         w.wait_for(lambda: flight.launched)
     finally:
         launcher.stop()
+
+
+def test_ato_buttons_open_with_first_snapshot(
+    app: QApplication,
+    serve: Callable[..., FakeCompanion],
+    main_window: Callable[..., QLiberationWindow],
+    game: Game,
+    commands: FakeCommands,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A loaded dynamic save: a flight's Edit and Clone stay disabled until
+    the campaign's own snapshot is followed (the pick-up passing), then
+    enable without another click."""
+    monkeypatch.setattr(flightlauncher, "CHECK_INTERVAL_MS", 3_600_000)
+    use_commands(monkeypatch, commands)
+    commands.spawns_mission = ("b1", 1, 60.0)
+    plan_by_hand(game, 2)
+    loaded = save_and_load(game, tmp_path / "loaded.retribution")
+    assert loaded.live.awaiting_pickup
+    gate = threading.Event()
+    fake = serve([gate, event("state", state(loaded, 1))])
+    win = main_window(fake, loaded)
+    packages = win.ato_panel.package_panel
+    flights = win.ato_panel.flight_panel
+    packages.package_list.setCurrentIndex(win.game_model.ato_model.index(0, 0))
+    flights.flight_list.setCurrentIndex(flights.flight_list.model().index(0, 0))
+    pumped_until(app, lambda: fake.streams >= 1)
+    app.processEvents()
+
+    assert flights.flight_list.selected_item is not None
+    assert not flights.edit_button.isEnabled()
+    assert not flights.clone_button.isEnabled()
+
+    gate.set()
+    pumped_until(app, lambda: following(loaded))
+
+    assert flights.edit_button.isEnabled()
+    assert flights.clone_button.isEnabled()
+    assert packages.edit_button.isEnabled() and packages.clone_button.isEnabled()

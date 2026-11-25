@@ -73,6 +73,7 @@ from game.theater import (
 )
 from game.transfers import CargoShip, Convoy, TransferOrder
 from game.unitmap import SceneryObjectMapping
+from qt_ui.dialogs import planning_locked
 from tests.conftest import (
     generate_starting_mission,
     new_game,
@@ -933,6 +934,57 @@ def test_slice_two_save_never_picks_up() -> None:
         )
         == f"Companion: another mission is running{CONTINUE}"
     )
+
+
+# The planning lock: after a dynamic save is loaded, no package or flight is
+# created or edited until a snapshot of the campaign's own mission is
+# followed; once open, it stays open for the session.
+
+
+def test_planning_locked_after_load(
+    own_game: Game, mission_clock: Callable[[float], None], tmp_path: Path
+) -> None:
+    game, a = loaded_followed_at(own_game, mission_clock, tmp_path / "a.retribution")
+    assert planning_locked(game)
+
+    assert game.live.pick_up(a, view(a, 1010.0, (4, "spawned"))).picked
+    assert planning_locked(game), "picked up, not followed yet"
+    assert game.live.decide(a) is MissionVerdict.OWN
+
+    assert not planning_locked(game)
+
+
+def test_planning_opens_with_own_mission_only(
+    own_game: Game, mission_clock: Callable[[float], None], tmp_path: Path
+) -> None:
+    """Review Focus 5: the loaded save's first snapshot is another mission;
+    the lock holds until the campaign's own is followed, and a lost link
+    later does not lock it again."""
+    game, a = loaded_followed_at(own_game, mission_clock, tmp_path / "a.retribution")
+    record = game.live
+    c = snapshot("boot-c", 1, "Uzi 1-1", minute=12)
+    assert not record.pick_up(c, view(c, 10.0)).picked
+    assert record.decide(c) is MissionVerdict.FOREIGN
+    assert planning_locked(game)
+
+    assert record.decide(a) is MissionVerdict.OWN
+    assert not planning_locked(game)
+
+    record.lose()
+    assert not planning_locked(game)
+    assert record.decide(snapshot("boot-d", 1)) is MissionVerdict.FOREIGN
+    assert not record.following_own_mission
+    assert not planning_locked(game)
+
+
+def test_normal_campaign_never_locked(saved_games: Path, tmp_path: Path) -> None:
+    game = new_game(dynamic=False, squadrons_start_full=True, campaign_file=CAMPAIGN)
+    game.pass_turn(no_action=True)
+    assert game.turn == 1
+
+    loaded = save_and_load(game, tmp_path / "normal.retribution")
+
+    assert not planning_locked(loaded)
 
 
 def test_dynamic_mission_path(saved_games: Path) -> None:

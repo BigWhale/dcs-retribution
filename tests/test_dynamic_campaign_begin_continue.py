@@ -933,11 +933,17 @@ def test_planning_locked_at_turn_zero(
     saved_games: Path,
 ) -> None:
     use_commands(monkeypatch, commands)
+    # Nothing is launched once the mission is followed: the flight stays
+    # editable.
+    monkeypatch.setattr(flightlauncher, "CHECK_INTERVAL_MS", 3_600_000)
     uiconstants.load_event_icons()  # the package dialogs'
     uiconstants.load_aircraft_icons()
     game = new_game(dynamic=True, squadrons_start_full=True, campaign_file=CAMPAIGN)
     plan_by_hand(game, 2)  # as a save made before Begin might hold
-    win = main_window(serve([]), game)
+    # Begin's link: its mission's first snapshot once the gate opens.
+    gate = threading.Event()
+    script: list[Item] = [gate, ""]
+    win = main_window(serve(script), game)
     packages = win.ato_panel.package_panel
     flights = win.ato_panel.flight_panel
     target = game.theater.controlpoints[0]
@@ -976,13 +982,21 @@ def test_planning_locked_at_turn_zero(
     win.game_model.ato_model.replace_from_game(player=True)
     count = len(game.blue.ato.packages)
     select_first_package()
-
-    for button in (
+    buttons = (
         packages.edit_button,
         packages.clone_button,
         flights.edit_button,
         flights.clone_button,
-    ):
+    )
+    # Locked until Begin's mission is followed.
+    for button in buttons:
+        assert not button.isEnabled(), button.text()
+
+    script[1] = event("state", state(game, 1, boot="b2"))
+    gate.set()
+    pumped_until(app, lambda: following(game))
+
+    for button in buttons:
         assert button.isEnabled(), button.text()
     try:
         Dialog.open_new_package_dialog(target, win)

@@ -56,6 +56,7 @@ from game.squadrons import Squadron
 from game.theater import Airfield, ControlPoint, Fob
 from game.theater.theatergroundobject import ShipGroundObject
 from game.transfers import TransferOrder
+from qt_ui.dialogs import planning_locked
 from tests.conftest import (
     generate_starting_mission,
     new_game,
@@ -720,6 +721,29 @@ def test_replaced_mission_is_not_followed(
     assert record.current_verdict is MissionVerdict.OWN, "followed"
     assert record.name_map is record.written_map
     assert record.keep(restored)
+
+
+def test_planning_locked_after_continue(
+    own: Game, start_miz: Path, tmp_path: Path
+) -> None:
+    """Continue's restore locks planning until the restored mission, under
+    its new marker, is followed; the replaced mission does not open it."""
+    record = own.live
+    assert record.decide(snapshot_of(own, start_miz)) is MissionVerdict.OWN
+    assert not planning_locked(own)
+
+    result = write_restore(own, tmp_path / "retribution_dynamic.miz")
+    assert planning_locked(own)
+
+    later = snapshot_of(
+        own, start_miz, at=own.conditions.start_time + timedelta(hours=1)
+    )
+    assert record.decide(later) is MissionVerdict.FOREIGN
+    assert planning_locked(own)
+
+    restored = snapshot_of(own, result.path, boot="b2", at=result.start)
+    assert record.decide(restored) is MissionVerdict.OWN
+    assert not planning_locked(own)
 
 
 def test_restored_missions_tick_waits_for_its_snapshot(
