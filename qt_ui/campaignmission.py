@@ -56,8 +56,9 @@ log = logging.getLogger(__name__)
 
 #: How long the server has to load a mission, from the request, in seconds.
 LOAD_WAIT_S = 180.0
-#: How long the load request may take, in seconds.
-LOAD_TIMEOUT_S = 10.0
+#: How long the load request may take, in seconds: longer than the
+#: companion's own 10 s wait for the hook, so its answer comes back.
+LOAD_TIMEOUT_S = 12.0
 #: How often the wait looks at its clock, in milliseconds.
 WAIT_CHECK_MS = 1_000
 

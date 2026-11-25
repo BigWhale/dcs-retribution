@@ -761,6 +761,21 @@ def test_pickup_unknown_spawn(
     assert one.reason == "the server's mission has 1 flight this save never launched"
 
 
+def test_pickup_too_late_and_unknown_spawn(
+    own_game: Game, mission_clock: Callable[[float], None], tmp_path: Path
+) -> None:
+    """Both too late and holding flights the save never launched: the
+    flights are named."""
+    game, a = loaded_followed_at(own_game, mission_clock, tmp_path / "a.retribution")
+
+    refused = game.live.pick_up(a, view(a, 1400.0, (5, "spawned")))
+
+    reason = "the server's mission has 1 flight this save never launched"
+    assert refused == PickUp(True, False, 400.0, reason)
+    assert game.live.moved_on_reason == reason
+    assert game.live.decide(a) is MissionVerdict.MOVED_ON
+
+
 def test_pickup_written_not_followed(
     own_game: Game, mission_clock: Callable[[float], None], tmp_path: Path
 ) -> None:

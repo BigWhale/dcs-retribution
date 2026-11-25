@@ -226,7 +226,8 @@ class CompanionLinkController(QObject):
             reason=live.moved_on_reason if live is not None else None,
             loading=self._loading,
             load_failed=self._load_failed,
-            awaiting=self._awaiting_port,
+            # Only while the gate is on: Continue ends it between snapshots.
+            awaiting=self._awaiting_port and live is not None and live.awaiting_pickup,
         )
 
     def recheck(self) -> None:

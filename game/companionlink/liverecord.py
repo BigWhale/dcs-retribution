@@ -325,7 +325,8 @@ class LiveRecord:
         Picks the mission up when it is the save's own (followed at the save,
         or written last and never followed, its clock then counting from 0),
         at most `PICKUP_S` past the save's model time, and holds no spawn
-        over the save's highest, failed ones aside. A view of another mission
+        over the save's highest, failed ones aside (when both fail, the
+        flights are the reason given). A view of another mission
         than the snapshot's decides nothing. Once decided, the gate is off;
         a refused mission of the campaign's is `MOVED_ON`, another mission is
         left to `decide`.
@@ -358,23 +359,23 @@ class LiveRecord:
         else:
             uuid = None
         seconds = 0.0 if base is None else view.model_time - base
+        unknown = [
+            number
+            for number, status in view.spawns
+            if status != "failed" and (saved.spawn is None or number > saved.spawn)
+        ]
         reason: Optional[str] = None
         if base is None:
             reason = "another mission is running"
+        elif unknown:
+            # Named before the time: the flights say more about the save.
+            flights = "flight" if len(unknown) == 1 else "flights"
+            reason = (
+                f"the server's mission has {len(unknown)} {flights} "
+                "this save never launched"
+            )
         elif seconds > PICKUP_S:
             reason = f"the server's mission is {_minutes(seconds)} past this save"
-        else:
-            unknown = [
-                number
-                for number, status in view.spawns
-                if status != "failed" and (saved.spawn is None or number > saved.spawn)
-            ]
-            if unknown:
-                flights = "flight" if len(unknown) == 1 else "flights"
-                reason = (
-                    f"the server's mission has {len(unknown)} {flights} "
-                    "this save never launched"
-                )
         self.awaiting_pickup = False
         if reason is None:
             log.info(

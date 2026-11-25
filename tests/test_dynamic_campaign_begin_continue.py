@@ -61,13 +61,16 @@ from tests.conftest import (  # noqa: E402
     save_and_load,
 )
 from tests.test_dynamic_campaign_live_gui import (  # noqa: E402,F401
+    AWAITING,
     CAMPAIGN,
     FOLLOWED_NOT,
     Boxes,
+    FollowedSave,
     Window,
     app,
     boxes,
     commands,
+    followed_save,
     following,
     game,
     main_window,
@@ -617,6 +620,41 @@ def test_begin_write_failed_then_continue(
     assert file is not None and marker is not None
     assert carries_marker(persistency.mission_path_for(file), marker)
     w.wait_for(lambda: commands.loads == [file])
+
+
+def test_continue_ends_wait_for_command_port(
+    serve: Callable[..., FakeCompanion],
+    window: Callable[..., Window],
+    mission_of: Callable[[Window], CampaignMission],
+    followed_save: FollowedSave,
+    commands: FakeCommands,
+    boxes: Boxes,
+) -> None:
+    """A loaded save's pick-up could not reach the command port; the port
+    comes back and Continue runs before the next snapshot: the restored
+    mission is followed and its time shown, no wait for the port."""
+    assert commands.server is not None
+    port = commands.server.server_address[1]
+    commands.close()  # the companion restarting
+    loaded = followed_save.game
+    gate = threading.Event()
+    script: list[Item] = [followed_save.running(3, 1180.0), gate, ""]
+    w = window(serve(script), loaded)
+    mission = mission_of(w)
+    w.wait_for(lambda: w.link.status_text() == AWAITING)
+
+    commands.start(port)
+    boxes.answer = OK
+    mission.continue_()
+    file = loaded.live.mission_file
+    assert file is not None
+    w.wait_for(lambda: commands.loads == [file])
+    w.wait_for(lambda: w.link.status_text() == loading(file))
+
+    script[2] = event("state", state(loaded, 1, boot="b2"))
+    gate.set()
+    w.wait_for(lambda: following(loaded) and mission.loading is None)
+    assert w.link.status_text() == "DCS Companion time: 1 minute"
 
 
 def test_spawn_confirmed_into_restored_away_mission(
