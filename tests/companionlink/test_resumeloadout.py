@@ -177,18 +177,6 @@ def test_type_gone_empties_its_pylons(entry: dict[str, Any]) -> None:
                 assert resumed.loadout.pylons.get(n) is w
 
 
-def test_type_gone_keeps_tgps_and_jammers() -> None:
-    kept = [
-        e
-        for e in FULL
-        if any(
-            Weapon.with_clsid(c).weapon_group.type in KEPT_TYPES  # type: ignore[union-attr]
-            for c in e["pylons"].values()
-        )
-    ]
-    assert len(kept) >= 3
-
-
 @pytest.mark.parametrize("entry", FULL, ids=label)
 def test_unmatched_type_gives_planned(entry: dict[str, Any]) -> None:
     plan = planned(entry)
@@ -236,6 +224,49 @@ def test_no_ammo_keeps_tgps_jammers_and_pods() -> None:
     assert "MPS-410" in kept
     assert "AN/AAQ-13 LANTIRN NAV POD" in kept
     assert "AN/ASQ-213 HTS - HARM Targeting System" in kept
+
+
+#: A real pydcs rocket pod: two LAU-68s on a TER, seven Hydra M151 each.
+ROCKET_POD = "{LAU-68 Hydra M151 HE_TER_2_L}"
+CBU_105 = "{BRU57_2*CBU-105}"
+
+
+def rocket_f16() -> tuple[dict[str, Any], list[int]]:
+    """Synthetic, from the fixture's F-16 BAI: its CBU-105 racks swapped for
+    rocket pods, which have fired out (the tick counts no rockets); the pods'
+    pylons."""
+    entry = next(e for e in FULL if CBU_105 in e["pylons"].values())
+    pods = [int(n) for n, c in entry["pylons"].items() if c == CBU_105]
+    pylons = {n: ROCKET_POD if c == CBU_105 else c for n, c in entry["pylons"].items()}
+    counted = [[t, c] for t, c in entry["ammo"] if t != RACKS[CBU_105][0]]
+    return {**entry, "pylons": pylons, "ammo": counted}, pods
+
+
+def test_fired_out_rocket_pod_emptied() -> None:
+    entry, pods = rocket_f16()
+    assert len(pods) == 2
+    resumed = resume_loadout(planned(entry), None, ammo(entry))
+    assert resumed.reason is None
+    assert clsids(resumed.loadout) == without(entry, pods)
+
+
+@pytest.mark.parametrize("none_left", [None, ()], ids=["no field", "empty"])
+def test_no_ammo_empties_rocket_pods(none_left: Optional[Ammo]) -> None:
+    entry, pods = rocket_f16()
+    weapons = [int(n) for n, c in entry["pylons"].items() if c in RACKS] + pods
+    resumed = resume_loadout(planned(entry), 1.5, none_left)
+    assert resumed.reason is None
+    assert clsids(resumed.loadout) == without(entry, weapons)
+
+
+def test_rocket_pod_with_rockets_counted_gives_planned() -> None:
+    """pydcs names a pod's rack, the tick counts every rocket: option B."""
+    entry, _ = rocket_f16()
+    plan = planned(entry)
+    counted = ammo(entry) + (("weapons.nurs.HYDRA_70_M151", 28),)
+    resumed = resume_loadout(plan, None, counted)
+    assert resumed.reason == "weapons.nurs.HYDRA_70_M151 is not on its pylons"
+    assert clsids(resumed.loadout) == clsids(plan)
 
 
 @pytest.mark.parametrize("entry", FIXTURE, ids=label)

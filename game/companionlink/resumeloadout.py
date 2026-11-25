@@ -30,13 +30,17 @@ resume_ammo.json`):
   name's first `<n> x`, `<n>x` or `<n>*`, else 1.
 - Not ammo, never emptied for ammo: a clean pylon (`<CLEAN>`), fuel tanks
   (pydcs name has `fuel tank`, any case), TGPs and jammers (`WeaponType.TGP`,
-  `JAMMER`, `OFFENSIVE_JAMMER`), and a pylon that matches no key and whose
-  name has `pod` or `targeting` (a nav pod; the F-16's AN/ASQ-213 HTS, `HARM
-  Targeting System`, which the tick does not count and whose type is
-  `unknown`). A rocket pod that matches a key is ammo.
+  `JAMMER`, `OFFENSIVE_JAMMER`), and a sensor pod: a pylon that matches no
+  key and whose name has one of `SENSOR_WORDS` (a nav pod; the F-16's
+  AN/ASQ-213 HTS, `HARM Targeting System`, which the tick does not count and
+  whose type is `unknown`; datalink, ECM, ACMI, camera, recon, ELINT, FLIR
+  pods and the like, read off pydcs's pods that carry no weapons).
 - Any other pylon that matches no key carries a weapon the tick no longer
   counts: it is emptied. So is every such pylon when `ammo` is None or empty
-  (the hook leaves `ammo` out when a unit carries none).
+  (the hook leaves `ammo` out when a unit carries none). Rocket and bomblet
+  pods are ammo: a pod fired out (its type gone from the tick) is emptied,
+  never more weapons than the tick counts. A pod of a sensor this list does
+  not know is emptied too: fewer, never more.
 - Fewer of a type than planned: its pylons are emptied highest-numbered first
   until they hold no more than the tick counts (a rack partly fired is
   emptied whole: never more weapons than counted).
@@ -64,7 +68,27 @@ GUNS = "weapons.shells."
 FUEL_TANK = "fuel tank"
 KEPT_TYPES = {WeaponType.TGP, WeaponType.JAMMER, WeaponType.OFFENSIVE_JAMMER}
 CLEAN = "<CLEAN>"
-NOT_AMMO_WORDS = ("POD", "TARGETING")
+#: Words of pods that carry no weapons, in a pydcs name upper-cased.
+SENSOR_WORDS = (
+    "NAV POD",
+    "TARGETING",
+    "DATALINK",
+    "DATA LINK",
+    "DATA-LINK",
+    "ECM",
+    "ACMI",
+    "CAMERA",
+    "RECON",
+    "ELINT",
+    "FLIR",
+    "IRST SENSOR",
+    "LLTV",
+    "TRAVEL POD",
+    "REFUELLING",
+    "RADAR POD",
+    "COUNTERMEASURES",
+    "CHAFF POD",
+)
 
 _NOT_KEY = re.compile(r"[^A-Z0-9]")
 _COUNT_BEFORE = re.compile(r"(\d+)\s*[x*]\s*$")
@@ -115,7 +139,7 @@ def resume_loadout(
             )
         if hits:
             on_pylons[hits[0]].append((n, _count(weapon, hits[0])))
-        elif not _pod(weapon):
+        elif not _sensor(weapon):
             emptied.append(n)
 
     for key, pylons in on_pylons.items():
@@ -158,9 +182,9 @@ def _never_ammo(weapon: Weapon) -> bool:
     )
 
 
-def _pod(weapon: Weapon) -> bool:
+def _sensor(weapon: Weapon) -> bool:
     name = weapon.name.upper()
-    return any(word in name for word in NOT_AMMO_WORDS)
+    return any(word in name for word in SENSOR_WORDS)
 
 
 def _count(weapon: Weapon, key: str) -> int:
