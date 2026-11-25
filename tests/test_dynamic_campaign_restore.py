@@ -646,6 +646,7 @@ def test_failed_restore_changes_nothing(
     tick_of(own, start_miz, launched=[ramp, landed])
     record = own.live
     marker, written_map = record.marker, record.written_map
+    assert record.planning_open, "its own mission followed"
     verdicts = dict(record.verdicts)
     packages = {c: list(c.ato.packages) for c in (own.blue, own.red)}
     flights = ato_flights(own)
@@ -659,6 +660,7 @@ def test_failed_restore_changes_nothing(
         write_restore(own, blocker / "retribution_dynamic.miz")
 
     assert record.marker == marker and record.written_map is written_map
+    assert record.planning_open, "planning stays open"
     assert record.verdicts == verdicts
     assert {c: list(c.ato.packages) for c in (own.blue, own.red)} == packages
     assert ato_flights(own) == flights

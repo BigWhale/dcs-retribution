@@ -251,6 +251,7 @@ def write_restore(game: Game, path: Path) -> RestoreResult:
 
     record = game.live
     marker, written_map = record.marker, record.written_map
+    planning_open = record.planning_open
     planners = game.ground_planners
     # Written beside `path` and moved onto it whole: a failed write leaves the
     # mission written before as it was.
@@ -264,6 +265,7 @@ def write_restore(game: Game, path: Path) -> RestoreResult:
         os.replace(temporary, path)
     except BaseException:
         record.marker, record.written_map = marker, written_map
+        record.planning_open = planning_open
         game.ground_planners = planners
         with contextlib.suppress(OSError):
             temporary.unlink(missing_ok=True)

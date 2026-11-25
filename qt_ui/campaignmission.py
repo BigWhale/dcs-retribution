@@ -247,6 +247,7 @@ class CampaignMission(QObject):
         raises."""
         record = game.live
         marker, written_map = record.marker, record.written_map
+        planning_open = record.planning_open
         # Written beside `path` and moved onto it whole.
         temporary = path.with_name(path.name + ".tmp")
         try:
@@ -258,6 +259,7 @@ class CampaignMission(QObject):
             os.replace(temporary, path)
         except BaseException:
             record.marker, record.written_map = marker, written_map
+            record.planning_open = planning_open
             with contextlib.suppress(OSError):
                 temporary.unlink(missing_ok=True)
             raise
