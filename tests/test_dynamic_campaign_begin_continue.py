@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import threading
+import time
 import zipfile
 import zlib
 from dataclasses import replace
@@ -27,19 +28,29 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QToolBar  # noqa: E402
 
 from game import persistency  # noqa: E402
 from game.companionlink.liverecord import MARKER_PREFIX, MissionVerdict  # noqa: E402
 from game.companionlink.livestate import LiveStateContext  # noqa: E402
 from game.companionlink.launching import due_flights  # noqa: E402
+from game.companionlink.linkstatus import LinkStatus  # noqa: E402
 from game.companionlink.restore import restore_start  # noqa: E402
 from game.companionlink.snapshot import parse_snapshot  # noqa: E402
 from game.game import Game  # noqa: E402
-from qt_ui import campaignmission, companionlinkcontroller, flightlauncher  # noqa: E402
+from qt_ui import (  # noqa: E402
+    campaignmission,
+    commandwatch,
+    companionlinkcontroller,
+    flightlauncher,
+    liberation_install,
+    uiconstants,
+)
 from qt_ui.campaignmission import CampaignMission  # noqa: E402
+from qt_ui.dialogs import Dialog  # noqa: E402
 from qt_ui.flightlauncher import FlightLauncher  # noqa: E402
 from qt_ui.windows.GameUpdateSignal import GameUpdateSignal  # noqa: E402
+from qt_ui.windows.QLiberationWindow import QLiberationWindow  # noqa: E402
 from tests.conftest import (  # noqa: E402
     FakeCommands,
     FakeCompanion,
@@ -59,6 +70,8 @@ from tests.test_dynamic_campaign_live_gui import (  # noqa: E402,F401
     commands,
     following,
     game,
+    main_window,
+    pumped_until,
     state,
     use_commands,
     window,
@@ -712,3 +725,239 @@ def test_normal_campaign_panel_unchanged(
     assert panel.passTurnButton.isVisibleTo(panel)
     assert panel.proceedButton.isVisibleTo(panel)
     assert not w.link.active
+
+
+# The toolbar: Begin and Continue at the end of the Actions toolbar, for a
+# dynamic campaign only, enabled while the command port answers; no package
+# or flight planned before Begin.
+
+NOT_RUNNING = "DCS Companion is not running"
+REFUSED = "DCS Companion refused the command token"
+
+
+@pytest.fixture
+def fast_watch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The command watch asks every 50 ms."""
+    monkeypatch.setattr(commandwatch, "COMMAND_WATCH_MS", 50)
+
+
+def toolbar_texts(win: QLiberationWindow) -> list[str]:
+    return [a.text() for bar in win.findChildren(QToolBar) for a in bar.actions()]
+
+
+def watch_status(win: QLiberationWindow) -> LinkStatus:
+    """The window's command watch's status, read anew."""
+    return win.command_watch.status
+
+
+def opened_dialogs() -> tuple[object, object, object]:
+    """The new package, edit package and edit flight dialogs opened last."""
+    return (
+        Dialog.new_package_dialog,
+        Dialog.edit_package_dialog,
+        Dialog.edit_flight_dialog,
+    )
+
+
+def pump_for(app: QApplication, seconds: float) -> None:
+    """Turns the Qt event loop for `seconds`."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+
+
+def test_toolbar_dynamic_turn_zero(
+    app: QApplication,
+    serve: Callable[..., FakeCompanion],
+    main_window: Callable[..., QLiberationWindow],
+    commands: FakeCommands,
+    fast_watch: None,
+    monkeypatch: pytest.MonkeyPatch,
+    saved_games: Path,
+) -> None:
+    use_commands(monkeypatch, commands)
+    port = int(commands.address.rsplit(":", 1)[1])
+    commands.close()  # DCS Companion is not running
+    game = new_game(dynamic=True, squadrons_start_full=True, campaign_file=CAMPAIGN)
+    win = main_window(serve([]), game)
+
+    assert win.beginAction.isVisible() and not win.continueAction.isVisible()
+    assert win.campaignSeparator.isVisible()
+    assert win.actions_bar.actions()[-3:] == [
+        win.campaignSeparator,
+        win.beginAction,
+        win.continueAction,
+    ], "at the end, after a separator"
+    pump_for(app, 0.3)  # the watch has asked
+    assert not win.beginAction.isEnabled()
+    assert win.beginAction.toolTip() == NOT_RUNNING
+
+    commands.start(port)
+    pumped_until(app, lambda: win.beginAction.isEnabled())
+    assert watch_status(win) is LinkStatus.LINKED
+    assert win.beginAction.toolTip() == "Begin"
+
+    monkeypatch.setattr(liberation_install, "companion_command_token", lambda: "x")
+    pumped_until(app, lambda: not win.beginAction.isEnabled())
+    assert watch_status(win) is LinkStatus.REFUSED
+    assert win.beginAction.toolTip() == REFUSED
+
+
+def test_toolbar_dynamic_begun(
+    app: QApplication,
+    serve: Callable[..., FakeCompanion],
+    main_window: Callable[..., QLiberationWindow],
+    game: Game,
+    commands: FakeCommands,
+    boxes: Boxes,
+    fast_watch: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    use_commands(monkeypatch, commands)
+    win = main_window(serve([]), game)
+
+    assert win.continueAction.isVisible() and not win.beginAction.isVisible()
+    assert win.campaignSeparator.isVisible()
+    pumped_until(app, lambda: win.continueAction.isEnabled())
+    assert win.continueAction.toolTip() == "Continue"
+
+    boxes.answer = OK
+    win.continueAction.trigger()
+
+    assert boxes.shown == [CONTINUE_NOW]
+    file = game.live.mission_file
+    assert file is not None and DATED.fullmatch(file)
+    assert win.campaign_mission.loading == file
+    assert not win.continueAction.isEnabled()
+    assert win.continueAction.toolTip() == f"Waiting for the server to load {file}"
+    pumped_until(app, lambda: commands.loads == [file])
+    pump_for(app, 0.2)  # the watch still answers: the load still waits
+    assert not win.continueAction.isEnabled()
+
+
+def test_toolbar_normal_campaign(
+    app: QApplication,
+    main_window: Callable[..., QLiberationWindow],
+    commands: FakeCommands,
+    fast_watch: None,
+    monkeypatch: pytest.MonkeyPatch,
+    saved_games: Path,
+) -> None:
+    use_commands(monkeypatch, commands)
+    game = new_game(dynamic=False, squadrons_start_full=True, campaign_file=CAMPAIGN)
+    win = main_window(None, game)
+
+    def none_shown() -> bool:
+        return not any(
+            a.isVisible()
+            for a in (win.beginAction, win.continueAction, win.campaignSeparator)
+        )
+
+    assert none_shown()
+    game.turn = 1
+    GameUpdateSignal.get_instance().updateGame(game)
+    assert none_shown()
+    pump_for(app, 0.2)
+    with commands.lock:
+        assert commands.lists == [], "no watch for a normal campaign"
+
+
+def test_toolbar_links_removed(
+    main_window: Callable[..., QLiberationWindow],
+    saved_games: Path,
+) -> None:
+    game = new_game(dynamic=False, squadrons_start_full=True, campaign_file=CAMPAIGN)
+    win = main_window(None, game)
+
+    texts = toolbar_texts(win)
+    for gone in (
+        "&Discord Server",
+        "&Github Repo",
+        "&DCS: Pretense",
+        "&Generate a Pretense Campaign from the running campaign",
+    ):
+        assert gone not in texts
+    assert "&Ukraine" in texts
+    [help_menu] = [m for m in win.menuBar().findChildren(QMenu) if m.title() == "&Help"]
+    help_texts = [a.text() for a in help_menu.actions()]
+    assert "&Discord Server" in help_texts and "&Github Repo" in help_texts
+
+
+def test_planning_locked_at_turn_zero(
+    app: QApplication,
+    serve: Callable[..., FakeCompanion],
+    main_window: Callable[..., QLiberationWindow],
+    commands: FakeCommands,
+    boxes: Boxes,
+    fast_watch: None,
+    monkeypatch: pytest.MonkeyPatch,
+    saved_games: Path,
+) -> None:
+    use_commands(monkeypatch, commands)
+    uiconstants.load_event_icons()  # the package dialogs'
+    uiconstants.load_aircraft_icons()
+    game = new_game(dynamic=True, squadrons_start_full=True, campaign_file=CAMPAIGN)
+    plan_by_hand(game, 2)  # as a save made before Begin might hold
+    win = main_window(serve([]), game)
+    packages = win.ato_panel.package_panel
+    flights = win.ato_panel.flight_panel
+    target = game.theater.controlpoints[0]
+    monkeypatch.setattr(Dialog, "new_package_dialog", None)
+    monkeypatch.setattr(Dialog, "edit_package_dialog", None)
+    monkeypatch.setattr(Dialog, "edit_flight_dialog", None)
+
+    def select_first_package() -> None:
+        packages.package_list.setCurrentIndex(win.game_model.ato_model.index(0, 0))
+        flights.flight_list.setCurrentIndex(flights.flight_list.model().index(0, 0))
+
+    select_first_package()
+    Dialog.open_new_package_dialog(target, win)
+    packages.on_edit()
+    packages.on_clone()
+    flights.on_edit()
+    flights.on_clone()
+
+    assert opened_dialogs() == (None, None, None)
+    assert len(game.blue.ato.packages) == 1
+    assert len(game.blue.ato.packages[0].flights) == 1
+    for button in (
+        packages.edit_button,
+        packages.clone_button,
+        flights.edit_button,
+        flights.clone_button,
+    ):
+        assert not button.isEnabled(), button.text()
+
+    pumped_until(app, lambda: win.beginAction.isEnabled())
+    boxes.answer = OK
+    win.beginAction.trigger()
+    assert game.turn == 1
+    assert win.continueAction.isVisible() and not win.beginAction.isVisible()
+    plan_by_hand(game, 2)
+    win.game_model.ato_model.replace_from_game(player=True)
+    count = len(game.blue.ato.packages)
+    select_first_package()
+
+    for button in (
+        packages.edit_button,
+        packages.clone_button,
+        flights.edit_button,
+        flights.clone_button,
+    ):
+        assert button.isEnabled(), button.text()
+    try:
+        Dialog.open_new_package_dialog(target, win)
+        packages.on_edit()
+        flights.on_edit()
+        assert None not in opened_dialogs()
+    finally:
+        for dialog in (
+            Dialog.new_package_dialog,
+            Dialog.edit_package_dialog,
+            Dialog.edit_flight_dialog,
+        ):
+            if dialog is not None:
+                dialog.close()
+    packages.on_clone()
+    assert len(game.blue.ato.packages) == count + 1

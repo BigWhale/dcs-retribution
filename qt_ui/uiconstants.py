@@ -90,6 +90,10 @@ def load_icons():
     ICONS["Settings"] = QPixmap(
         "./resources/ui/misc/" + get_theme_icons() + "/settings.png"
     )
+    ICONS["Begin"] = QPixmap("./resources/ui/misc/" + get_theme_icons() + "/begin.png")
+    ICONS["Continue"] = QPixmap(
+        "./resources/ui/misc/" + get_theme_icons() + "/continue.png"
+    )
     ICONS["Statistics"] = QPixmap(
         "./resources/ui/misc/" + get_theme_icons() + "/statistics.png"
     )

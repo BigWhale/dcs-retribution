@@ -1,7 +1,6 @@
 import logging
 import traceback
 import webbrowser
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -20,16 +19,17 @@ from PySide6.QtWidgets import (
 import qt_ui.uiconstants as CONST
 from game import Game, VERSION, persistency, Migrator
 from game.ato import Flight
+from game.companionlink.linkstatus import LinkStatus
 from game.debriefing import Debriefing
 from game.game import TurnState
 from game.layout import LAYOUTS
-from game.persistency import pre_pretense_backups_dir
-from game.pretense.pretensemissiongenerator import PretenseMissionGenerator
 from game.server import EventStream, GameContext
 from game.server.dependencies import QtCallbacks, QtContext
 from game.theater import ControlPoint, MissionTarget, TheaterGroundObject
 from game.theater.controlpoint import motorpools_inside_capture_zone
 from qt_ui import liberation_install
+from qt_ui.campaignmission import CampaignMission
+from qt_ui.commandwatch import CommandWatch
 from qt_ui.companionlinkcontroller import CompanionLinkController
 from qt_ui.dialogs import Dialog
 from qt_ui.dynamicautosave import DynamicAutosave
@@ -98,6 +98,12 @@ class QLiberationWindow(QMainWindow):
         )
         # A dynamic campaign is autosaved after each launch.
         self.flight_launcher.launched.connect(self.dynamic_autosave.autosave_now)
+        # A dynamic campaign's Begin and Continue, and whether the companion's
+        # command port answers for them.
+        self.campaign_mission = CampaignMission(
+            self.game_model, self.sim_controller, self.companion_link, self
+        )
+        self.command_watch = CommandWatch(self)
         self.ato_panel = QAirTaskingOrderPanel(self.game_model, self.flight_launcher)
         # Each snapshot moves the mission clock: the lists' times are dated
         # against it.
@@ -167,6 +173,8 @@ class QLiberationWindow(QMainWindow):
 
     def connectSignals(self):
         GameUpdateSignal.get_instance().gameupdated.connect(self.setGame)
+        self.command_watch.changed.connect(self.update_campaign_actions)
+        self.campaign_mission.changed.connect(self.update_campaign_actions)
         GameUpdateSignal.get_instance().debriefingReceived.connect(self.onDebriefing)
         GameUpdateSignal.get_instance().game_state_changed.connect(self.onEndGame)
 
@@ -219,19 +227,14 @@ class QLiberationWindow(QMainWindow):
             lambda: webbrowser.open_new_tab("https://shdwp.github.io/ukraine/")
         )
 
-        self.pretenseLinkAction = QAction("&DCS: Pretense", self)
-        self.pretenseLinkAction.setIcon(QIcon(CONST.ICONS["Pretense_discord"]))
-        self.pretenseLinkAction.triggered.connect(
-            lambda: webbrowser.open_new_tab(
-                "https://" + "discord.gg" + "/" + "PtPsb9Mpk6"
-            )
-        )
+        # A dynamic campaign's, shown by `update_campaign_actions`.
+        self.beginAction = QAction("Begin", self)
+        self.beginAction.setIcon(CONST.ICONS["Begin"])
+        self.beginAction.triggered.connect(self.campaign_mission.begin)
 
-        self.newPretenseAction = QAction(
-            "&Generate a Pretense Campaign from the running campaign", self
-        )
-        self.newPretenseAction.setIcon(QIcon(CONST.ICONS["Pretense_generate"]))
-        self.newPretenseAction.triggered.connect(self.newPretenseCampaign)
+        self.continueAction = QAction("Continue", self)
+        self.continueAction.setIcon(CONST.ICONS["Continue"])
+        self.continueAction.triggered.connect(self.campaign_mission.continue_)
 
         self.openLogsAction = QAction("Show &logs", self)
         self.openLogsAction.triggered.connect(self.showLogsDialog)
@@ -271,16 +274,48 @@ class QLiberationWindow(QMainWindow):
         self.tool_bar.addAction(self.saveGameAction)
 
         self.links_bar = self.addToolBar("Links")
-        self.links_bar.addAction(self.openDiscordAction)
-        self.links_bar.addAction(self.openGithubAction)
         self.links_bar.addAction(self.ukraineAction)
-        self.links_bar.addAction(self.pretenseLinkAction)
-        self.links_bar.addAction(self.newPretenseAction)
 
         self.actions_bar = self.addToolBar("Actions")
         self.actions_bar.addAction(self.openSettingsAction)
         self.actions_bar.addAction(self.openStatsAction)
         self.actions_bar.addAction(self.openNotesAction)
+        self.campaignSeparator = self.actions_bar.addSeparator()
+        self.actions_bar.addAction(self.beginAction)
+        self.actions_bar.addAction(self.continueAction)
+        self.update_campaign_actions()
+
+    def update_campaign_actions(self, *_args: object) -> None:
+        """Shows a dynamic campaign's Begin (before it has begun) or Continue
+        (after), enabled while the companion's command port answers and, for
+        Continue, no load it asked for is waited for; their tooltips say why
+        not."""
+        game = self.game
+        dynamic = game is not None and game.dynamic_campaign
+        begun = game is not None and game.turn > 0
+        self.campaignSeparator.setVisible(dynamic)
+        self.beginAction.setVisible(dynamic and not begun)
+        self.continueAction.setVisible(dynamic and begun)
+        status = self.command_watch.status
+        if status is LinkStatus.LINKED:
+            why_not = None
+        elif status is LinkStatus.REFUSED:
+            why_not = "DCS Companion refused the command token"
+        else:
+            why_not = "DCS Companion is not running"
+        loading = self.campaign_mission.loading
+        self._enable_campaign_action(self.beginAction, why_not)
+        self._enable_campaign_action(
+            self.continueAction,
+            f"Waiting for the server to load {loading}" if loading else why_not,
+        )
+
+    @staticmethod
+    def _enable_campaign_action(action: QAction, why_not: Optional[str]) -> None:
+        """Enabled without a reason not to be; the tooltip gives the reason,
+        else the action's text."""
+        action.setEnabled(why_not is None)
+        action.setToolTip(why_not or "")
 
     def initMenuBar(self):
         self.menu = self.menuBar()
@@ -344,28 +379,6 @@ class QLiberationWindow(QMainWindow):
         wizard = NewGameWizard(self)
         wizard.show()
         wizard.accepted.connect(lambda: self.onGameGenerated(wizard.generatedGame))
-
-    def newPretenseCampaign(self):
-        output = persistency.mission_path_for("pretense_campaign.miz")
-        try:
-            PretenseMissionGenerator(
-                self.game, self.game.conditions.start_time
-            ).generate_miz(output)
-        except Exception as e:
-            now = datetime.now()
-            date_time = now.strftime("%Y-%d-%mT%H_%M_%S")
-            path = pre_pretense_backups_dir()
-            tgt = path / f"pre-pretense-backup_{date_time}.retribution"
-            path /= f".pre-pretense-backup.retribution"
-            if path.exists():
-                with open(path, "rb") as source:
-                    with open(tgt, "wb") as target:
-                        target.write(source.read())
-            raise e
-
-        title = "Pretense campaign generated"
-        msg = f"A Pretense campaign mission has been successfully generated in {output}"
-        QMessageBox.information(QApplication.focusWidget(), title, msg, QMessageBox.Ok)
 
     def openFile(self):
         if self.game is not None and self.game.savepath:
@@ -519,6 +532,8 @@ class QLiberationWindow(QMainWindow):
             self.flight_launcher.set_game(game)
             self.live_losses.set_game(self.game_model)
             self.dynamic_autosave.set_game(game)
+            self.campaign_mission.set_game(game)
+            self.command_watch.set_game(game)
         except AttributeError:
             logging.exception("Incompatible save game")
             QMessageBox.critical(
@@ -533,6 +548,7 @@ class QLiberationWindow(QMainWindow):
             GameUpdateSignal.get_instance().updateGame(None)
         finally:
             self.enable_game_actions(self.game is not None)
+            self.update_campaign_actions()
 
     def showAboutDialog(self):
         contributors = [
@@ -716,6 +732,7 @@ class QLiberationWindow(QMainWindow):
             # `QUIT_WAIT_S`).
             self.dynamic_autosave.autosave_on_quit()
             self.flight_launcher.stop()
+            self.command_watch.stop()
             self.companion_link.stop()
             self._save_window_geometry()
             super().closeEvent(event)

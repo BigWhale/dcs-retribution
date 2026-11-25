@@ -45,6 +45,14 @@ from ..models import AtoModel, GameModel, NullListModel, PackageModel
 IN_FLIGHT = "In Flight"
 
 
+def _planning_locked(game_model: GameModel) -> bool:
+    """Whether no package or flight may be created or edited: a dynamic
+    campaign before Begin."""
+    from qt_ui.dialogs import planning_locked
+
+    return planning_locked(game_model.game)
+
+
 class FlightDelegate(TwoColumnRowDelegate):
     def __init__(self, package: Package, game_model: GameModel) -> None:
         super().__init__(rows=3, columns=2, font_size=10)
@@ -173,6 +181,8 @@ class QFlightList(QListView):
         )
 
     def clone_flight(self, index: QModelIndex) -> None:
+        if _planning_locked(self.game_model):
+            return
         flight = self.package_model.flight_at_index(index)
         try:
             clone = Flight.clone_flight(flight)
@@ -200,7 +210,7 @@ class QFlightList(QListView):
 
         edit_action = QAction("Edit")
         edit_action.triggered.connect(lambda: self.edit_flight(index))
-        edit_action.setEnabled(not locked)
+        edit_action.setEnabled(not locked and not _planning_locked(self.game_model))
         menu.addAction(edit_action)
 
         delete_action = QAction(f"Delete")
@@ -290,12 +300,14 @@ class QFlightPanel(QGroupBox):
         A dynamic campaign's flight that is in flight or on its way there can
         be cloned but neither edited, cancelled nor launched again; Launch is
         shown in a dynamic campaign only, enabled while the link receives.
+        Before a dynamic campaign's Begin, no flight is edited or cloned.
         """
         index = self.flight_list.currentIndex()
         enabled = index.isValid()
         locked = self.flight_list.is_locked(index)
-        self.edit_button.setEnabled(enabled and not locked)
-        self.clone_button.setEnabled(enabled)
+        may_plan = not _planning_locked(self.game_model)
+        self.edit_button.setEnabled(enabled and not locked and may_plan)
+        self.clone_button.setEnabled(enabled and may_plan)
         self.delete_button.setEnabled(enabled and not locked)
         game = self.game_model.game
         dynamic = (
@@ -403,6 +415,7 @@ class QPackageList(QListView):
         launcher: Optional[FlightLauncher] = None,
     ) -> None:
         super().__init__()
+        self.game_model = game_model
         self.ato_model = model
         self.launcher = launcher
         self.setModel(model)
@@ -426,6 +439,8 @@ class QPackageList(QListView):
         Dialog.open_edit_package_dialog(self.ato_model.get_package_model(index))
 
     def clone_package(self, index: QModelIndex) -> None:
+        if _planning_locked(self.game_model):
+            return
         package_model = self.ato_model.get_package_model(index)
         try:
             clone = Package.clone_package(package_model.package)
@@ -474,6 +489,7 @@ class QPackageList(QListView):
 
         edit_action = QAction("Edit")
         edit_action.triggered.connect(lambda: self.edit_package(index))
+        edit_action.setEnabled(not _planning_locked(self.game_model))
         menu.addAction(edit_action)
 
         delete_action = QAction(f"Delete")
@@ -517,6 +533,7 @@ class QPackagePanel(QGroupBox):
         launcher: Optional[FlightLauncher] = None,
     ) -> None:
         super().__init__("Packages")
+        self.game_model = game_model
         self.ato_model = ato_model
         self.ato_model.layoutChanged.connect(self.on_current_changed)
 
@@ -604,10 +621,12 @@ class QPackagePanel(QGroupBox):
 
     def enable_buttons(self, enabled: bool) -> None:
         """Enables the buttons; Cancel/abort not while the selected package
-        holds a flight in flight or on its way there."""
+        holds a flight in flight or on its way there, Edit and Clone not
+        before a dynamic campaign's Begin."""
         locked = self.package_list.is_locked(self.package_list.currentIndex())
-        self.edit_button.setEnabled(enabled)
-        self.clone_button.setEnabled(enabled)
+        may_plan = enabled and not _planning_locked(self.game_model)
+        self.edit_button.setEnabled(may_plan)
+        self.clone_button.setEnabled(may_plan)
         self.delete_button.setEnabled(enabled and not locked)
 
 

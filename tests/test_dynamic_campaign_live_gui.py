@@ -954,6 +954,7 @@ def main_window(
         signal.budgetupdated.disconnect(win.top_panel.budget_update)
         win.dynamic_autosave.set_game(None)
         win.flight_launcher.stop()
+        win.command_watch.stop()
         win.companion_link.stop()
         # Gone, so a later window's close does not close it again.
         win.deleteLater()
