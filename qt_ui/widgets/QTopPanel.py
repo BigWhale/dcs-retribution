@@ -1,4 +1,3 @@
-import logging
 from datetime import datetime
 from typing import List, Optional
 
@@ -18,9 +17,6 @@ from game import Game, persistency
 from game.ato.flightstate import Uninitialized
 from game.ato.package import Package
 from game.ato.traveltime import TotEstimator
-from game.companionlink.liverecord import LiveTick
-from game.companionlink.liveunitmap import LiveUnitMap
-from game.companionlink.restore import restore_start, write_restore
 from game.profiling import logged_duration
 from game.settings.settings import FastForwardStopCondition
 from game.utils import meters
@@ -84,17 +80,6 @@ class QTopPanel(QFrame):
         companion_link.snapshot_received.connect(self.update_companion_status)
         companion_link.verdict_changed.connect(self.update_companion_status)
 
-        # Writes a dynamic campaign's mission again from the newest snapshot of
-        # it (the tick): shown once the campaign has begun, enabled with a tick.
-        self.restore_button = QPushButton("Restore mission")
-        self.restore_button.setProperty("style", "btn-primary")
-        # (PySide6 6.4's stub lacks the signal.)
-        self.restore_button.clicked.connect(self.restore_mission)  # type: ignore[attr-defined]
-        self.restore_button.setVisible(False)
-        self.restore_button.setEnabled(False)
-        companion_link.snapshot_received.connect(self.update_restore_button)
-        companion_link.verdict_changed.connect(self.update_restore_button)
-
         self.factionsInfos = QFactionsInfos(self.game)
 
         self.air_wing = QPushButton("Air Wing")
@@ -131,7 +116,6 @@ class QTopPanel(QFrame):
         self.proceedBoxLayout.addWidget(self.passTurnButton)
         self.proceedBoxLayout.addWidget(self.proceedButton)
         self.proceedBoxLayout.addWidget(self.companion_status)
-        self.proceedBoxLayout.addWidget(self.restore_button)
         self.proceedBox.setLayout(self.proceedBoxLayout)
 
         self.controls = [
@@ -195,87 +179,21 @@ class QTopPanel(QFrame):
         else:
             raise RuntimeError(f"game.turn out of bounds!\n  value = {game.turn}")
 
-        # A dynamic campaign has no Take off and no Pass Turn: only Begin Campaign,
-        # on turn 0. A normal game shows them as before.
+        # A dynamic campaign has no Begin Campaign, Take off or Pass Turn: it
+        # begins and continues from the toolbar. A normal game shows them as
+        # before.
         dynamic = game.dynamic_campaign
         self.proceedButton.setVisible(not dynamic)
-        self.passTurnButton.setVisible(not dynamic or game.turn == 0)
+        self.passTurnButton.setVisible(not dynamic)
         if self.show_sim_speed_controls:
             for button in self.simSpeedControls.buttons.values():
                 button.setVisible(not dynamic)
         if not dynamic:
             self.companion_status.setVisible(False)
-        self.show_restore_button(game)
 
     def update_companion_status(self, _: object = None) -> None:
         self.companion_status.setText(self.companion_link.status_text())
         self.companion_status.setVisible(self.companion_link.active)
-
-    def update_restore_button(self, _: object = None) -> None:
-        self.show_restore_button(self.game)
-
-    def show_restore_button(self, game: Optional[Game]) -> None:
-        """Shown for a dynamic campaign that has begun, enabled when it keeps a
-        tick (a slice 1 save has none until its mission is followed)."""
-        begun = game is not None and game.dynamic_campaign and game.turn > 0
-        self.restore_button.setVisible(begun)
-        self.restore_button.setEnabled(
-            begun and game is not None and game.live.tick is not None
-        )
-
-    def restore_mission(self) -> None:
-        """Writes the dynamic campaign's mission again from its tick; asks
-        first while the campaign's own mission is followed."""
-        game = self.game
-        if game is None or not game.dynamic_campaign:
-            return
-        tick = game.live.tick
-        if tick is None:
-            return
-        if game.live.following_own_mission and not self.confirm_restore(tick):
-            return
-        path = persistency.mission_path_for("retribution_dynamic.miz")
-        with logged_duration("Restoring dynamic campaign"):
-            try:
-                result = write_restore(game, path)
-            except Exception as ex:
-                # A corrupt tick or an unwritable path: the game is as before.
-                logging.exception("Dynamic campaign: restoring %s failed", path)
-                QMessageBox.warning(
-                    self,
-                    "Mission not restored",
-                    f"{path.name} was not written: {ex}",
-                    QMessageBox.StandardButton.Ok,
-                )
-                return
-            GameUpdateSignal.get_instance().updateGame(game)
-            persistency.autosave(game)
-            # The mission replaced is no longer followed, at once.
-            self.companion_link.recheck()
-        QMessageBox.information(
-            self,
-            "Mission restored",
-            (
-                f"{path.name} was written, starting "
-                f"{result.start:%Y-%m-%d %H:%M}. Load it on the server."
-            ),
-            QMessageBox.StandardButton.Ok,
-        )
-
-    def confirm_restore(self, tick: LiveTick) -> bool:
-        result = QMessageBox.question(
-            self,
-            "Restore the campaign's mission?",
-            (
-                "The campaign's mission is running. The restored mission starts "
-                f"at {restore_start(tick):%H:%M}, minute {tick.minute} of the "
-                "running one. From now on only the restored mission is followed; "
-                "nothing that happens in the running one is applied."
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        return result == QMessageBox.StandardButton.Yes
 
     def open_air_wing(self):
         self.dialog = AirWingDialog(self.game_model, self.window())
@@ -286,73 +204,12 @@ class QTopPanel(QFrame):
         self.dialog.show()
 
     def passTurn(self):
-        if self.game is not None and self.game.dynamic_campaign:
-            self.begin_dynamic_campaign()
-            return
         with logged_duration("Skipping turn"):
             self.game.pass_turn(no_action=True)
             GameUpdateSignal.get_instance().updateGame(self.game)
             state = self.game_model.game.check_win_loss()
             GameUpdateSignal.get_instance().gameStateChanged(state)
             self.proceedButton.setEnabled(True)
-
-    def begin_dynamic_campaign(self) -> None:
-        """Begins a dynamic campaign and writes its starting mission."""
-        game = self.game
-        assert game is not None
-        with logged_duration("Beginning dynamic campaign"):
-            game.pass_turn(no_action=True)
-            # Recreates the sim for the new turn, so it comes before generation.
-            GameUpdateSignal.get_instance().updateGame(game)
-            path = persistency.mission_path_for("retribution_dynamic.miz")
-            # The mission carries a new marker; the link follows only it.
-            game.live.new_marker()
-            try:
-                self.sim_controller.generate_miz(path)
-            except Exception as ex:
-                # The campaign is at turn 1 already and has no regenerate path,
-                # so say so instead of failing silently.
-                logging.exception("Dynamic campaign: writing %s failed", path)
-                QMessageBox.warning(
-                    self,
-                    "Starting mission not written",
-                    (
-                        f"The dynamic campaign has begun, but its starting mission "
-                        f"({path.name}) was not written:<br /><br />{ex}<br /><br />"
-                        "Regenerating it is not possible in this version. Restart "
-                        "Retribution and load the save, or start a new dynamic "
-                        "campaign."
-                    ),
-                    QMessageBox.StandardButton.Ok,
-                )
-            else:
-                logging.info("Dynamic campaign begun, mission written to %s", path)
-                # Its losses are debriefed against the names it was written
-                # with, kept with the save.
-                game_loop = self.sim_controller.game_loop
-                unit_map = game_loop.sim.unit_map if game_loop is not None else None
-                if unit_map is None:
-                    logging.error(
-                        "Dynamic campaign: %s was written but its name map is "
-                        "missing; live losses will not apply",
-                        path,
-                    )
-                    QMessageBox.warning(
-                        self,
-                        "Live losses will not apply",
-                        (
-                            "The dynamic campaign has begun and its starting "
-                            f"mission ({path.name}) was written, but the mission's "
-                            "name map is missing, so live losses will not apply to "
-                            "the campaign.<br /><br />Start a new dynamic campaign."
-                        ),
-                        QMessageBox.StandardButton.Ok,
-                    )
-                else:
-                    game.live.written(LiveUnitMap.from_generation(unit_map, game))
-                persistency.autosave(game)
-        self.passTurnButton.setVisible(False)
-        self.companion_link.start(game)
 
     def negative_start_packages(self, now: datetime) -> List[Package]:
         packages = []

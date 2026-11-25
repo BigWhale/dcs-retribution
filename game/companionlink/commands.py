@@ -8,7 +8,7 @@ it is due, or `409` when a spawn of the mission still holds the name.
 record, whose `status` tells what became of it. `POST /v1/despawn` removes a group of the mission
 now (`200` with its `units`, `404` when there is no such group).
 `POST /v1/mission/load` asks the server to load a mission from its `Missions/`
-(`202`; the load itself is not awaited). Errors come as `{"error": "..."}` with
+(`202` with the mission it replaces; the load itself is not awaited). Errors come as `{"error": "..."}` with
 a fitting status; a wrong token is `401`.
 
 Every call blocks (the launcher runs them on a worker thread) and fails with
@@ -222,14 +222,15 @@ class CompanionCommands:
             entries.append((int(found.group(1)), status))
         return SpawnsView(boot, session, float(model_time), tuple(entries))
 
-    def load_mission(self, file: str) -> None:
-        """Asks the companion to load `file` from the server's `Missions/`.
+    def load_mission(self, file: str) -> tuple[str, int]:
+        """Asks the companion to load `file` from the server's `Missions/`;
+        the mission (boot, session) it asked to replace.
 
         Returns once the companion has asked the hook (`202`); the load itself
         follows, seen as a new session. Any other answer (`400` bad name, `404`
         no such file, `502` refused by the hook, `503` link down, `504` no
-        answer in time) or no answer raises CommandError with the companion's
-        text.
+        answer in time), no answer, or a `202` that does not name the mission
+        replaced raises CommandError with the companion's text.
         """
         resp = self._send(
             "POST",
@@ -239,7 +240,19 @@ class CompanionCommands:
         )
         if resp.status_code != 202:
             raise self._refusal(resp)
+        body = self._json(resp)
+        boot = body.get("boot")
+        session = body.get("session")
+        if (
+            not isinstance(boot, str)
+            or not isinstance(session, int)
+            or isinstance(session, bool)
+        ):
+            raise CommandError(
+                resp.status_code, "the load answer does not name the mission"
+            )
         log.info("companion mission load asked: %s", file)
+        return boot, session
 
     def reachable(self) -> LinkStatus:
         """Whether the command port answers (`GET /v1/spawns`): LINKED on 200,

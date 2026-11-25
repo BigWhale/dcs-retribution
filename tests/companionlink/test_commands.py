@@ -242,9 +242,10 @@ def test_spawns_view(fake: FakeCommands) -> None:
 
 
 def test_load_mission_round_trip(fake: FakeCommands) -> None:
-    CompanionCommands(fake.address, TOKEN).load_mission("camp.miz")
+    replaced = CompanionCommands(fake.address, TOKEN).load_mission("camp.miz")
 
     assert fake.loads == ["camp.miz"]
+    assert replaced == ("b1", 1)
 
 
 def test_load_mission_refused(
