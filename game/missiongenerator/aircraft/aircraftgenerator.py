@@ -25,6 +25,7 @@ from game.ato.flightstate import Completed, WaitingForStart
 from game.ato.flighttype import FlightType
 from game.ato.package import Package
 from game.ato.starttype import StartType
+from game.companionlink.resume import Resumed
 from game.missiongenerator.countryassigner import CountryAssigner
 from game.missiongenerator.missiondata import MissionData
 from game.radio.radios import RadioRegistry
@@ -153,7 +154,11 @@ class AircraftGenerator:
                 continue
             for flight in package.flights:
                 if flight.alive and not isinstance(flight.state, Completed):
-                    if not flight.squadron.location.runway_is_operational():
+                    # A restore's flight in the air at the tick flies already.
+                    if (
+                        not isinstance(flight.state, Resumed)
+                        and not flight.squadron.location.runway_is_operational()
+                    ):
                         logging.warning(
                             f"Runway not operational, skipping flight: {flight.flight_type}"
                         )

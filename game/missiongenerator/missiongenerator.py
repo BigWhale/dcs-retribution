@@ -16,6 +16,7 @@ from dcs.unit import Static
 from dcs.unitgroup import Group
 
 from game.atcdata import AtcData
+from game.companionlink.resume import Resumed
 from game.dcs.beacons import Beacons
 from game.dcs.helpers import unit_type_from_name
 from game.missiongenerator.aircraft.aircraftgenerator import (
@@ -28,6 +29,7 @@ from game.ato.flighttype import FlightType
 from game.radio.companion import plan_companion
 from game.radio.radios import RadioFrequency, RadioRegistry, MHz
 from game.radio.tacan import TacanRegistry
+from game.runways import RunwayData
 from game.theater import Airfield, NavalControlPoint
 from game.theater.bullseye import Bullseye
 from game.unitmap import UnitMap
@@ -64,8 +66,9 @@ class MissionGenerator:
     ) -> None:
         self.game = game
         self.time = time
-        #: A dynamic campaign's restored mission: no flights, the aircraft not
-        #: in the air parked (`game.companionlink.restore`).
+        #: A dynamic campaign's restored mission: only the flights in the air
+        #: at the tick (state `Resumed`), the other aircraft parked
+        #: (`game.companionlink.restore`).
         self.restore = restore
         self.mission = Mission(game.theater.terrain)
         self.unit_map = UnitMap()
@@ -358,6 +361,8 @@ class MissionGenerator:
                 self.game.red.ato,
                 tgo_generator.runways,
             )
+        else:
+            self.generate_resumed_flights(aircraft_generator, tgo_generator.runways)
         aircraft_generator.spawn_unused_aircraft()
 
         self.mission_data.flights = aircraft_generator.flights
@@ -369,6 +374,42 @@ class MissionGenerator:
 
         if self.game.settings.plugins.get("ewrj"):
             self._configure_react_to_threat_for_ew_jamming_packages(aircraft_generator)
+
+    def generate_resumed_flights(
+        self, aircraft_generator: AircraftGenerator, runways: dict[str, RunwayData]
+    ) -> None:
+        """A restore's flights: only those whose state is `Resumed`.
+
+        For the generation each ATO holds only the packages with a resumed
+        flight, and each of those only its resumed flights, the package's
+        primary flight first, so a flight that names it (an escort) names a
+        group already generated. The ATOs and the packages' flights are put
+        back afterwards.
+        """
+        atos = [self.game.blue.ato, self.game.red.ato]
+        saved_packages = [ato.packages for ato in atos]
+        saved_flights = [(p, p.flights) for ato in atos for p in ato.packages]
+        try:
+            for ato in atos:
+                packages = []
+                for package in ato.packages:
+                    resumed = [
+                        f for f in package.flights if isinstance(f.state, Resumed)
+                    ]
+                    if not resumed:
+                        continue
+                    package.flights = resumed
+                    primary = package.primary_flight
+                    package.flights = sorted(resumed, key=lambda f: f is not primary)
+                    packages.append(package)
+                ato.packages = packages
+            for ato in atos:
+                aircraft_generator.generate_flights(ato, runways)
+        finally:
+            for ato, packages in zip(atos, saved_packages):
+                ato.packages = packages
+            for package, flights in saved_flights:
+                package.flights = flights
 
     def _live_unit_positions(self) -> list[tuple[float, float]]:
         # World (x, z) of every live unit already spawned (TGO SAM/BAI, FARP depots,

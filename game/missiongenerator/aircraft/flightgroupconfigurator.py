@@ -17,6 +17,8 @@ from dcs.unitgroup import FlyingGroup
 from game.ato import Flight, FlightType
 from game.ato.flightplans.shiprecoverytanker import RecoveryTankerFlightPlan
 from game.callsigns import callsign_for_support_unit
+from game.companionlink.resume import Resumed
+from game.companionlink.resumeloadout import resume_loadout
 from game.data.weapons import Pylon, Weapon, WeaponType
 from game.lasercodes.lasercode import LaserCode
 from game.missiongenerator.logisticsgenerator import LogisticsGenerator
@@ -37,6 +39,7 @@ from .bingoestimator import BingoEstimator
 from .flightdata import FlightData
 from .waypoints import WaypointGenerator
 from ...ato.flightmember import FlightMember
+from ...ato.loadouts import Loadout
 from ...ato.flightplans.aewc import AewcFlightPlan
 from ...ato.flightplans.packagerefueling import PackageRefuelingFlightPlan
 from ...ato.flightplans.theaterrefueling import TheaterRefuelingFlightPlan
@@ -52,6 +55,9 @@ from ...theater import Fob
 
 if TYPE_CHECKING:
     from game import Game
+
+#: The dynamic campaign's logger: a resumed unit's planned loadout.
+companion_log = logging.getLogger("game.companionlink")
 
 
 class FlightGroupConfigurator:
@@ -421,6 +427,8 @@ class FlightGroupConfigurator:
             self.setup_payload(unit, member)
 
     def setup_payload(self, unit: FlyingUnit, member: FlightMember) -> None:
+        """The member's loadout on the unit; a resumed unit's stripped down to
+        what the tick says it still carries."""
         unit.pylons.clear()
 
         loadout = member.loadout
@@ -437,6 +445,8 @@ class FlightGroupConfigurator:
                 self.flight.squadron.coalition.faction,
                 target,
             )
+        if isinstance(self.flight.state, Resumed):
+            loadout = self._resume_loadout(unit, loadout, self.flight.state)
 
         for pylon_number, weapon in loadout.pylons.items():
             if weapon is None:
@@ -448,6 +458,24 @@ class FlightGroupConfigurator:
                 member.weapon_laser_code,
             )
             pylon.equip(unit, weapon, settings)
+
+    def _resume_loadout(
+        self, unit: FlyingUnit, loadout: Loadout, state: Resumed
+    ) -> Loadout:
+        """The loadout without what the unit's tick no longer counts; the
+        planned one, logged, when the tick cannot be matched to it."""
+        index = next(i for i, u in enumerate(self.group.units) if u is unit)
+        tick = state.units[index]
+        result = resume_loadout(loadout, tick.fuel, tick.ammo)
+        if result.reason is not None:
+            state.planned_loadout.append(str(unit.name))
+            companion_log.info(
+                "Resume: %s %s: planned loadout (%s)",
+                self.flight,
+                unit.name,
+                result.reason,
+            )
+        return result.loadout
 
     @staticmethod
     def _merge_laser_code(
@@ -470,6 +498,17 @@ class FlightGroupConfigurator:
         return merged
 
     def setup_fuel(self) -> None:
+        state = self.flight.state
+        if isinstance(state, Resumed):
+            # Internal fuel from each aircraft's tick fraction; over 1 its
+            # external tanks hold the rest (`resume_loadout` keeps them).
+            fuel_max = self.flight.unit_type.dcs_unit_type.fuel_max
+            for unit, tick in zip(self.group.units, state.units):
+                if tick.fuel is None:
+                    unit.fuel = self.flight.fuel
+                else:
+                    unit.fuel = min(tick.fuel, 1.0) * fuel_max
+            return
         fuel = self.flight.state.estimate_fuel()
         if fuel < 0:
             logging.warning(

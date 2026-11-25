@@ -8,7 +8,8 @@ mission. The tick is saved with the game; a save from before it loads with
 none.
 
 A restore writes the campaign's mission again at the tick's minute, read back
-here with pydcs: no flights, the aircraft not in the air parked, a new marker;
+here with pydcs: only the flights in the air at the tick (resumed, in
+`test_dynamic_campaign_resume.py`), the other aircraft parked, a new marker;
 the flights are sorted from the tick and the replaced mission is retired.
 
 The games are generated headless from a campaign shipped with Retribution,
@@ -47,6 +48,7 @@ from game.companionlink.restore import (
     sort_launched,
     write_restore,
 )
+from game.companionlink.resume import plan_resume
 from game.companionlink.snapshot import LiveSnapshot, parse_snapshot
 from game.data.units import UnitClass
 from game.game import Game
@@ -398,7 +400,7 @@ def snapshot_of(
     is merged into its unit (any of `x`, `y`, `alt`, `hdg`, `spd`, `fuel`,
     `ammo`, `inAir`), one named in `gone` is missing. The `extra` groups are
     added as given. Launched flights are added as plane groups under their
-    live names, at their departure, without the names counted dead.
+    live names, at their departure, without the names counted dead or `gone`.
     """
     start = game.conditions.start_time
     if at is None:
@@ -422,7 +424,7 @@ def snapshot_of(
         position = flight.departure.position
         units = []
         for name in game.live.name_map.flight_units(flight):
-            if name in game.live.dead:
+            if name in game.live.dead or name in gone:
                 continue
             next_id += 1
             units.append(
@@ -558,11 +560,12 @@ def test_restore_starts_at_the_minute(
     assert (
         f"Restore: {path} written, starting {start:%Y-%m-%d %H:%M}, from minute 37; "
         f"{result.placed} units placed, 0 where generated; "
-        "flights: 0 in the air, 0 to launch again, 0 finished"
+        "flights: 0 in the air (0 aircraft resumed, 0 on planned loadout), "
+        "0 to launch again, 0 finished"
     ) in [r.getMessage() for r in caplog.records]
 
 
-def test_restore_writes_no_flights_and_parks_the_rest(
+def test_restore_writes_only_airborne_flights_and_parks_the_rest(
     own: Game, start_miz: Path, tmp_path: Path
 ) -> None:
     squadron = red_squadron(own)
@@ -579,7 +582,10 @@ def test_restore_writes_no_flights_and_parks_the_rest(
     before = parked_per_squadron(own, own.live.written_map)
     base = [s for s in squadrons(own) if s.location is squadron.location]
     assert all(before[s] == s.owned_aircraft for s in base), "the base parks all"
-    placement = RestorePlacement(own, tick, sort_launched(own, tick))
+    launched = sort_launched(own, tick)
+    assert tick.abs_time is not None
+    plans = [plan_resume(own, f, tick, tick.abs_time) for f in launched.in_air]
+    placement = RestorePlacement(own, tick, launched, [p for p in plans if p])
     assert placement.parked(squadron) == squadron.owned_aircraft - 1
     assert all(
         placement.parked(s) == s.owned_aircraft
@@ -592,15 +598,20 @@ def test_restore_writes_no_flights_and_parks_the_rest(
     result = write_restore(own, path)
 
     assert (result.in_air, result.again, result.finished) == (1, 1, 1)
+    assert result.resumed == 1
     mission = read_miz(path)
     written = own.live.written_map
     assert written is not None
     planned_ids = {id(f) for f in ato_flights(own)}
     unmapped = set()
+    flying = []
     for group in aircraft_groups(mission):
         names = [str(u.name) for u in group.units]
         if not any(n in written.aircraft for n in names):
             unmapped.add(str(group.name))
+            continue
+        if any(written.aircraft[n].flight is airborne for n in names):
+            flying.append(group)
             continue
         assert group.uncontrolled, group.name
         assert all(id(written.aircraft[n].flight) not in planned_ids for n in names)
@@ -609,7 +620,9 @@ def test_restore_writes_no_flights_and_parks_the_rest(
         for g in aircraft_groups(read_miz(start_miz))
         if not any(str(u.name) in own.live.name_map.aircraft for u in g.units)
     }
-    assert unmapped == started, "no flight groups, only the front lines' JTACs"
+    assert unmapped == started, "only the airborne flight and the JTACs"
+    [group] = flying
+    assert len(group.units) == 1 and not group.uncontrolled
     after = parked_per_squadron(own, written)
     for s in squadrons(own):
         if s.location is squadron.location:
@@ -620,7 +633,8 @@ def test_restore_writes_no_flights_and_parks_the_rest(
     assert not ramp.launched and ramp.live_group_name is None
     assert not any(f is landed for f in landed.package.flights)
     assert landed.package not in own.red.ato.packages
-    assert airborne.launched and airborne.live_group_name == "LIVE 1"
+    assert airborne.launched and airborne.live_group_name == str(group.name)
+    assert airborne.count == 1
     assert any(f is planned for f in ato_flights(own)) and not planned.launched
     for s in squadrons(own):
         held = sum(f.count for f in ato_flights(own) if f.squadron is s)

@@ -9,19 +9,36 @@ nearest are told apart by their planned times.
 The flights are hand-planned BARCAPs: takeoff (0), the racetrack's start (1)
 and end (2), the landing (3). The tests that need a route of a known shape
 lay it out from the takeoff waypoint, so they do not depend on the theater.
+
+A restore writes the flights in the air at the tick into the restored mission
+(read back here with pydcs): each resumed aircraft where the tick saw it, with
+its fuel and the weapons it still carries, flying on to the waypoint it was
+flying to; the rest of its flight goes back to its squadron.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import math
+import re
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, Optional
 
+import pytest
+from dcs.action import DoScript
 from dcs.mapping import Point
+from dcs.mission import Mission
+from dcs.unitgroup import FlyingGroup
 
 from game.ato.flight import Flight
+from game.ato.flighttype import FlightType
 from game.ato.flightwaypointtype import FlightWaypointType
+from game.ato.loadouts import Loadout
+from game.ato.package import Package
+from game.ato.starttype import StartType
+from game.companionlink.restore import RestoreResult, write_restore
 from game.companionlink.resume import (
     TIE_M,
     Resumed,
@@ -29,13 +46,20 @@ from game.companionlink.resume import (
     flown_to_index,
     plan_resume,
 )
+from game.data.weapons import Weapon
 from game.game import Game
+from game.squadrons import Squadron
+from game.theater import Airfield
 from game.utils import meters
-from tests.conftest import plan_by_hand
+from tests.conftest import plan_by_hand, squadrons
 from tests.test_dynamic_campaign_restore import (  # noqa: F401
+    aircraft_groups,
+    ato_flights,
     begun,
     launch,
     own,
+    parked_per_squadron,
+    read_miz,
     red_squadron,
     running,
     start_miz,
@@ -265,3 +289,384 @@ def _to_leg(p: tuple[float, float], a: Point, b: Point) -> float:
     t = ((p[0] - ax) * dx + (p[1] - ay) * dy) / (dx * dx + dy * dy)
     t = max(0.0, min(1.0, t))
     return math.hypot(p[0] - ax - t * dx, p[1] - ay - t * dy)
+
+
+# The restored mission: the resumed flights written into it.
+
+#: The tick unit fields of the flight in the air on its way to the racetrack.
+FUEL = (0.6, 0.4)
+
+
+def restore(game: Game, tmp_path: Path) -> tuple[RestoreResult, Mission]:
+    result = write_restore(game, tmp_path / "retribution_dynamic.miz")
+    return result, read_miz(result.path)
+
+
+def written_group(mission: Mission, flight: Flight) -> FlyingGroup[Any]:
+    """The flight's group in the written mission, by its live group name."""
+    [group] = [g for g in aircraft_groups(mission) if g.name == flight.live_group_name]
+    return group
+
+
+def parked(game: Game, squadron: Squadron) -> int:
+    written = game.live.written_map
+    assert written is not None
+    return parked_per_squadron(game, written)[squadron]
+
+
+def to_racetrack(flight: Flight) -> dict[str, dict[str, Any]]:
+    """The flight's two aircraft halfway to the racetrack's start, apart."""
+    points = lay_out(flight)
+    x, y = along(points[0], points[1], 0.5)
+    return {
+        "LIVE 1-1": flying(x, y, alt=6000.0, hdg=10.0, spd=200.0, fuel=FUEL[0]),
+        "LIVE 1-2": flying(
+            x - 300.0, y + 200.0, alt=6100.0, hdg=350.0, spd=200.0, fuel=FUEL[1]
+        ),
+    }
+
+
+def test_resumed_flight_written(own: Game, start_miz: Path, tmp_path: Path) -> None:
+    squadron = red_squadron(own)
+    flight = plan_by_hand(own, 2, squadron)
+    launch(own, flight, "LIVE 1")
+    air = to_racetrack(flight)
+    tick_of(own, start_miz, launched=[flight], air=air)
+    state = flight.state
+    racetrack = flight.flight_plan.waypoints[1].position
+
+    result, mission = restore(own, tmp_path)
+
+    group = written_group(mission, flight)
+    assert len(group.units) == 2
+    assert not group.late_activation and not group.uncontrolled
+    fuel_max = flight.unit_type.dcs_unit_type.fuel_max
+    for unit, tick, fuel in zip(group.units, air.values(), FUEL):
+        assert math.dist((unit.position.x, unit.position.y), (tick["x"], tick["y"])) < 1
+        assert unit.alt == pytest.approx(tick["alt"], abs=1)
+        assert unit.heading == pytest.approx(tick["hdg"], abs=1)
+        assert unit.fuel == pytest.approx(fuel * fuel_max, abs=1)
+    assert group.points[0].speed == pytest.approx(200.0)
+    assert (
+        math.dist(
+            (group.points[1].position.x, group.points[1].position.y),
+            (racetrack.x, racetrack.y),
+        )
+        < 1
+    )
+    assert flight.launched and flight.live_group_name == str(group.name)
+    written = own.live.written_map
+    assert written is not None
+    assert written.flight_units(flight) == [str(u.name) for u in group.units]
+    assert flight.count == 2
+    assert flight.state is state
+    assert (result.in_air, result.resumed) == (1, 2)
+    assert parked(own, squadron) == squadron.owned_aircraft - 2
+
+
+def task_ids(tasks: Any) -> Iterator[str]:
+    """The ids of the tasks, and of the tasks and actions they wrap."""
+
+    def walk(v: Any) -> Iterator[str]:
+        if isinstance(v, dict):
+            if isinstance(v.get("id"), str):
+                yield v["id"]
+            for x in v.values():
+                yield from walk(x)
+
+    for task in tasks:
+        yield from walk(task.dict())
+
+
+def test_resumed_orbit_task_on_point_zero(
+    own: Game, start_miz: Path, tmp_path: Path
+) -> None:
+    flight = plan_by_hand(own, 2, red_squadron(own))
+    launch(own, flight, "LIVE 1")
+    points = lay_out(flight)
+    x, y = along(points[1], points[2], 0.5)
+    plan = flight.flight_plan
+    begins = plan.tot_for_waypoint(plan.waypoints[1])
+    ends = plan.depart_time_for_waypoint(plan.waypoints[2])
+    assert begins is not None and ends is not None
+    tick_of(
+        own,
+        start_miz,
+        launched=[flight],
+        air={"LIVE 1-1": flying(x, y, alt=7000.0), "LIVE 1-2": flying(x, y + 50)},
+        at=begins + (ends - begins) / 2,
+    )
+
+    _, mission = restore(own, tmp_path)
+
+    group = written_group(mission, flight)
+    assert "Orbit" in set(task_ids(group.points[0].tasks))
+
+
+def test_mixed_flight_resumes_the_airborne(
+    own: Game, start_miz: Path, tmp_path: Path
+) -> None:
+    squadron = red_squadron(own)
+    flight = plan_by_hand(own, 3, squadron)
+    launch(own, flight, "LIVE 1")
+    own.live.landed.add("LIVE 1-2")
+    pilots = list(flight.roster.iter_pilots())
+    air = to_racetrack(flight)
+    tick_of(
+        own,
+        start_miz,
+        launched=[flight],
+        air={"LIVE 1-1": air["LIVE 1-1"], "LIVE 1-2": {"inAir": False}},
+        gone={"LIVE 1-3"},
+    )
+
+    _, mission = restore(own, tmp_path)
+
+    assert len(written_group(mission, flight).units) == 1
+    assert flight.count == 1
+    assert list(flight.roster.iter_pilots()) == [pilots[0]]
+    held = sum(f.count for f in ato_flights(own) if f.squadron is squadron)
+    assert squadron.untasked_aircraft == squadron.owned_aircraft - held
+    for pilot in pilots[1:]:
+        assert any(p is pilot for p in squadron.available_pilots)
+    assert parked(own, squadron) == squadron.owned_aircraft - 1
+
+
+def test_unit_without_fuel_gets_planned_fuel(
+    own: Game, start_miz: Path, tmp_path: Path
+) -> None:
+    """Review Focus 4: no fuel in the tick, the planned fuel."""
+    flight = plan_by_hand(own, 2, red_squadron(own))
+    launch(own, flight, "LIVE 1")
+    air = to_racetrack(flight)
+    del air["LIVE 1-1"]["fuel"]
+    tick_of(own, start_miz, launched=[flight], air=air)
+
+    _, mission = restore(own, tmp_path)
+
+    lead = written_group(mission, flight).units[0]
+    assert lead.fuel == pytest.approx(flight.fuel, abs=1)
+
+
+#: A real F-16's planned pylons and its full tick ammo
+#: (`tests/companionlink/data/resume_ammo.json`).
+F16 = "F-16CM Fighting Falcon (Block 50)"
+
+
+def fixture_entry(aircraft: str) -> dict[str, Any]:
+    path = Path(__file__).parent / "companionlink" / "data" / "resume_ammo.json"
+    return next(
+        e
+        for e in json.loads(path.read_text())
+        if e["aircraft"] == aircraft and e["full"]
+    )
+
+
+def fixture_loadout(entry: dict[str, Any]) -> Loadout:
+    pylons: dict[int, Optional[Weapon]] = {
+        int(n): Weapon.with_clsid(clsid) for n, clsid in entry["pylons"].items()
+    }
+    return Loadout("planned", pylons, None)
+
+
+def test_fired_weapons_left_off(
+    own: Game, start_miz: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    entry = fixture_entry(F16)
+    squadron = next(s for s in squadrons(own) if s.aircraft.variant_id == F16)
+    flight = plan_by_hand(own, 2, squadron)
+    for member in flight.iter_members():
+        member.loadout = fixture_loadout(entry)
+    launch(own, flight, "LIVE 1")
+    air = to_racetrack(flight)
+    fired = "weapons.bombs.CBU_105"
+    air["LIVE 1-1"]["ammo"] = [a for a in entry["ammo"] if a[0] != fired]
+    air["LIVE 1-2"]["ammo"] = [*entry["ammo"], ["weapons.missiles.NOPE_9", 1]]
+    for unit in air.values():
+        del unit["fuel"]  # the tanks stay
+    tick_of(own, start_miz, launched=[flight], air=air)
+
+    result, mission = restore(own, tmp_path)
+
+    lead, wing = written_group(mission, flight).units
+    planned = {int(n): c for n, c in entry["pylons"].items()}
+    cbu = {n for n, c in planned.items() if "CBU-105" in c}
+    assert cbu, "the F-16 carries CBU-105s"
+
+    def pylons(unit: Any) -> dict[int, str]:
+        return {int(n): p["CLSID"] for n, p in unit.pylons.items()}
+
+    assert pylons(lead) == {n: c for n, c in planned.items() if n not in cbu}
+    assert pylons(wing) == planned
+    assert result.planned_loadout == 1
+    assert (
+        f"Resume: {flight} {wing.name}: planned loadout "
+        "(weapons.missiles.NOPE_9 is not on its pylons)"
+    ) in [r.getMessage() for r in caplog.records]
+
+
+def test_resumed_flight_from_a_damaged_runway(
+    own: Game, start_miz: Path, tmp_path: Path
+) -> None:
+    """Review Focus 1: a flight in the air is written whatever its runway."""
+    squadron = red_squadron(own)
+    flight = plan_by_hand(own, 2, squadron)
+    launch(own, flight, "LIVE 1")
+    tick_of(own, start_miz, launched=[flight], air=to_racetrack(flight))
+    assert isinstance(squadron.location, Airfield)
+    squadron.location.damage_runway()
+    assert not squadron.location.runway_is_operational()
+
+    _, mission = restore(own, tmp_path)
+
+    assert len(written_group(mission, flight).units) == 2
+    assert flight.count == 2
+
+
+#: A group id no group of the restored mission has.
+STALE = 4242
+
+
+def group_ids(mission: Mission) -> set[int]:
+    ids: set[int] = set()
+    for coalition in mission.coalition.values():
+        for country in coalition.countries.values():
+            groups: list[Any] = [
+                *country.plane_group,
+                *country.helicopter_group,
+                *country.vehicle_group,
+                *country.ship_group,
+                *country.static_group,
+            ]
+            ids.update(group.id for group in groups)
+    return ids
+
+
+def referenced_ids(mission: Mission) -> set[int]:
+    """The group ids the mission's aircraft tasks, triggers and Retribution's
+    escort data name."""
+    found: set[int] = set()
+
+    def walk(v: Any, key: Any = None) -> None:
+        if isinstance(v, dict):
+            for k, x in v.items():
+                walk(x, k)
+        elif isinstance(v, (list, tuple)):
+            if key == "ai_task" and v:
+                found.add(int(v[0]))
+            for x in v:
+                walk(x)
+        elif key in ("groupId", "group") and isinstance(v, int):
+            found.add(v)
+
+    for group in aircraft_groups(mission):
+        for point in group.points:
+            for task in point.tasks:
+                walk(task.dict())
+        for task in group.tasks:
+            walk(task.dict())
+    for trigger in mission.triggerrules.triggers:
+        walk(trigger.dict())
+        for action in trigger.actions:
+            if isinstance(action, DoScript):
+                try:
+                    text = str(action.text)
+                except KeyError:  # a script written in place, not a string id
+                    text = str(action.text.id)
+                for m in re.finditer(r"escort(?:ed)?GroupId\W+(\d+)", text):
+                    found.add(int(m.group(1)))
+    return found
+
+
+def test_escort_resumed_without_its_target(
+    own: Game, start_miz: Path, tmp_path: Path
+) -> None:
+    """Review Focus 2: the escort's target flight, not in the restored
+    mission, is named by no task or trigger, not even by a stale group id."""
+    red = own.red
+    strikers = next(
+        s
+        for s in red.air_wing.iter_squadrons()
+        if s.aircraft.variant_id == "Su-24M Fencer-D"
+    )
+    escorts = next(
+        s
+        for s in red.air_wing.iter_squadrons()
+        if s.aircraft.variant_id == "MiG-23MLD Flogger-K"
+    )
+    target = next(
+        tgo
+        for cp in own.theater.controlpoints
+        if cp.captured.is_blue
+        for tgo in cp.ground_objects
+        if FlightType.STRIKE in tgo.mission_types(red.player)
+    )
+    package = Package(target, own.db.flights, auto_asap=True)
+    strike = Flight(package, strikers, 2, FlightType.STRIKE, StartType.COLD, None)
+    package.add_flight(strike)
+    escort = Flight(package, escorts, 2, FlightType.ESCORT, StartType.COLD, None)
+    package.add_flight(escort)
+    for f in package.flights:
+        f.recreate_flight_plan()
+    package.set_tot_asap(own.conditions.start_time)
+    red.ato.add_package(package)
+    strike.group_id = STALE
+    launch(own, escort, "LIVE 1")
+    waypoints = escort.flight_plan.waypoints
+    join = next(
+        i for i, w in enumerate(waypoints) if w.waypoint_type is FlightWaypointType.JOIN
+    )
+    x, y = along(waypoints[join].position, waypoints[join + 1].position, 0.5)
+    at = escort.flight_plan.depart_time_for_waypoint(waypoints[join])
+    if at is None:
+        at = escort.flight_plan.tot_for_waypoint(waypoints[join])
+    assert at is not None
+    tick_of(
+        own,
+        start_miz,
+        launched=[escort],
+        air={"LIVE 1-1": flying(x, y, alt=5000.0), "LIVE 1-2": flying(x, y + 50)},
+        at=max(at, own.conditions.start_time) + timedelta(minutes=1),
+    )
+
+    _, mission = restore(own, tmp_path)
+
+    assert len(written_group(mission, escort).units) == 2
+    ids = group_ids(mission)
+    assert STALE not in ids
+    references = referenced_ids(mission)
+    assert references, "the escort's task names a group"
+    assert references <= ids
+    assert strike.group_id == STALE, "put back after the generation"
+
+
+def test_failed_resume_write_changes_nothing(
+    own: Game, start_miz: Path, tmp_path: Path
+) -> None:
+    squadron = red_squadron(own)
+    flight = plan_by_hand(own, 2, squadron)
+    launch(own, flight, "LIVE 1")
+    air = to_racetrack(flight)
+    tick_of(
+        own,
+        start_miz,
+        launched=[flight],
+        air={"LIVE 1-1": air["LIVE 1-1"], "LIVE 1-2": {"inAir": False}},
+    )
+    members = list(flight.iter_members())
+    state = flight.state
+    untasked = {s: s.untasked_aircraft for s in squadrons(own)}
+    pilots = {s: list(s.available_pilots) for s in squadrons(own)}
+    blocker = tmp_path / "file"
+    blocker.write_text("")
+
+    with pytest.raises(OSError):
+        write_restore(own, blocker / "retribution_dynamic.miz")
+
+    assert list(flight.iter_members()) == members
+    assert flight.count == 2
+    assert flight.state is state
+    assert flight.launched and flight.live_group_name == "LIVE 1"
+    assert {s: s.untasked_aircraft for s in squadrons(own)} == untasked
+    assert {s: list(s.available_pilots) for s in squadrons(own)} == pilots

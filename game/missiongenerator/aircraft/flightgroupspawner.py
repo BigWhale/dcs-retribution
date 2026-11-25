@@ -33,6 +33,7 @@ from game.ato import Flight
 from game.ato.flightstate import InFlight
 from game.ato.starttype import StartType
 from game.ato.traveltime import GroundSpeed
+from game.companionlink.resume import Resumed
 from game.missiongenerator.missiondata import MissionData
 from game.naming import namegen
 from game.theater import Airfield, ControlPoint, Fob, NavalControlPoint, OffMapSpawn
@@ -328,10 +329,14 @@ class FlightGroupSpawner:
 
     def generate_mid_mission(self) -> FlyingGroup[Any]:
         assert isinstance(self.flight.state, InFlight)
+        # A restore's flight in the air at the tick: each aircraft where the
+        # tick saw it.
+        resumed = self.flight.state if isinstance(self.flight.state, Resumed) else None
         name = namegen.next_aircraft_name(self.country, self.flight)
         speed = self.flight.state.estimate_speed()
         pos = self.flight.state.estimate_position()
-        pos += Vector2(random.randint(100, 1000), random.randint(100, 1000))
+        if resumed is None:
+            pos += Vector2(random.randint(100, 1000), random.randint(100, 1000))
         alt, alt_type = self.flight.state.estimate_altitude()
         cp = self.flight.squadron.location.id
 
@@ -341,12 +346,20 @@ class FlightGroupSpawner:
         # We don't know where the ground is, so just make sure that any aircraft
         # spawning at an MSL altitude is spawned at some minimum altitude.
         # https://github.com/dcs-liberation/dcs_liberation/issues/1941
-        if alt_type == "BARO" and alt < MINIMUM_MID_MISSION_SPAWN_ALTITUDE_MSL:
+        if (
+            resumed is None
+            and alt_type == "BARO"
+            and alt < MINIMUM_MID_MISSION_SPAWN_ALTITUDE_MSL
+        ):
             alt = MINIMUM_MID_MISSION_SPAWN_ALTITUDE_MSL
 
         # Set a minimum AGL value for 'alt' if needed,
         # otherwise planes might crash in trees and stuff.
-        if alt_type == "RADIO" and alt < self.mission_data.cp_stack[cp]:
+        if (
+            resumed is None
+            and alt_type == "RADIO"
+            and alt < self.mission_data.cp_stack[cp]
+        ):
             alt = self.mission_data.cp_stack[cp]
             self.mission_data.cp_stack[cp] += STACK_SEPARATION
 
@@ -365,7 +378,25 @@ class FlightGroupSpawner:
         )
 
         group.points[0].alt_type = alt_type
+        if resumed is not None:
+            self._place_resumed(group, resumed)
         return group
+
+    def _place_resumed(self, group: FlyingGroup[Any], state: Resumed) -> None:
+        """Each unit at its tick position, altitude and heading; point 0 at
+        the lead's."""
+        terrain = self.mission.terrain
+        for unit, tick in zip(group.units, state.units):
+            unit.position = Point(tick.x, tick.y, terrain)
+            unit.alt = tick.alt
+            unit.heading = tick.heading
+        # pydcs writes each unit's heading toward point 1 unless told not to
+        # (an attribute its groups read but FlyingGroup does not declare).
+        setattr(group, "manualHeading", True)
+        # Its altitude (BARO) and speed are the lead's already, from the
+        # state's estimates.
+        lead = state.lead
+        group.points[0].position = Point(lead.x, lead.y, terrain)
 
     def _generate_at_airfield(
         self,
