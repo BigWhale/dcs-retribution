@@ -174,9 +174,7 @@ def test_not_managed(tmp_path: Path, serve: Callable[..., FakeCompanion]) -> Non
 def test_log_tail(home: Path) -> None:
     service = CompanionService(home, closed_port(), TOKEN)
     assert service.log_tail() == ""
-    (home / "companion.log").write_text(
-        "".join(f"line {n}\n" for n in range(1, 601))
-    )
+    (home / "companion.log").write_text("".join(f"line {n}\n" for n in range(1, 601)))
     tail = service.log_tail()
     assert tail.splitlines()[0] == "line 101"
     assert tail.splitlines()[-1] == "line 600"

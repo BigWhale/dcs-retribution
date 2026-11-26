@@ -31,6 +31,7 @@ from qt_ui import liberation_install
 from qt_ui.campaignmission import CampaignMission
 from qt_ui.commandwatch import CommandWatch
 from qt_ui.companionlinkcontroller import CompanionLinkController
+from qt_ui.companionmenu import CompanionMenu
 from qt_ui.dialogs import Dialog
 from qt_ui.dynamicautosave import DynamicAutosave
 from qt_ui.flightlauncher import FlightLauncher
@@ -333,6 +334,9 @@ class QLiberationWindow(QMainWindow):
 
         tools_menu = self.menu.addMenu("&Developer tools")
         tools_menu.addAction(self.importTemplatesAction)
+
+        self.companion_menu = CompanionMenu(self, lambda: self.companion_link.active)
+        self.menu.addMenu(self.companion_menu)
 
         help_menu = self.menu.addMenu("&Help")
         help_menu.addAction(self.openDiscordAction)

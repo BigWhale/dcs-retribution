@@ -25,6 +25,11 @@ DEFAULT_COMPANION_COMMAND_ADDRESS = "http://127.0.0.1:7792"
 __companion_command_address = DEFAULT_COMPANION_COMMAND_ADDRESS
 __companion_command_token = ""
 
+#: DCS Companion's folder where its service runs it (lake's dcs container):
+#: the companion menu's Restart, Turn off and on, and Show log act there.
+DEFAULT_COMPANION_HOME = "/config/dcs-companion"
+__companion_home = DEFAULT_COMPANION_HOME
+
 
 def _user_data_path() -> Path:
     if os.name == "nt":
@@ -56,6 +61,7 @@ def init():
     global __companion_token
     global __companion_command_address
     global __companion_command_token
+    global __companion_home
 
     if PREFERENCES_PATH.exists():
         try:
@@ -83,6 +89,7 @@ def init():
                 "companion_command_address", DEFAULT_COMPANION_COMMAND_ADDRESS
             )
             __companion_command_token = pref_data.get("companion_command_token", "")
+            __companion_home = pref_data.get("companion_home", DEFAULT_COMPANION_HOME)
             is_first_start = __setup_preferences_on_every_start
         except (KeyError, json.JSONDecodeError):
             __dcs_saved_game_directory = ""
@@ -96,6 +103,7 @@ def init():
             __companion_token = ""
             __companion_command_address = DEFAULT_COMPANION_COMMAND_ADDRESS
             __companion_command_token = ""
+            __companion_home = DEFAULT_COMPANION_HOME
             is_first_start = True
     else:
         __last_save_file = ""
@@ -174,6 +182,7 @@ def save_config():
     global __companion_token
     global __companion_command_address
     global __companion_command_token
+    global __companion_home
     pref_data = {
         "saved_game_dir": __dcs_saved_game_directory,
         "dcs_install_dir": __dcs_installation_directory,
@@ -186,6 +195,7 @@ def save_config():
         "companion_token": __companion_token,
         "companion_command_address": __companion_command_address,
         "companion_command_token": __companion_command_token,
+        "companion_home": __companion_home,
     }
     PREFERENCES_PATH.parent.mkdir(exist_ok=True, parents=True)
     with PREFERENCES_PATH.open("w") as prefs:
@@ -235,6 +245,11 @@ def companion_command_address() -> str:
 def companion_command_token() -> str:
     global __companion_command_token
     return __companion_command_token
+
+
+def companion_home() -> str:
+    global __companion_home
+    return __companion_home
 
 
 def ignore_empty_install_directory():

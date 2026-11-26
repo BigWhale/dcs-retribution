@@ -127,9 +127,7 @@ class CompanionService:
                 log.info("companion pid %d stopped", pid)
                 return True
             time.sleep(0.1)
-        log.info(
-            "companion pid %d still runs after %.1f s: SIGKILL", pid, self.grace
-        )
+        log.info("companion pid %d still runs after %.1f s: SIGKILL", pid, self.grace)
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
