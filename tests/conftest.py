@@ -159,6 +159,9 @@ class FakeCompanion:
         self.refused = 0
         #: How many hellos, from the first, leave out `lastSeq`.
         self.hellos_without_last = 0
+        #: The hello's `linked` (the hook link is up) and `session`.
+        self.linked = True
+        self.session = 1
         self.server: Optional[ThreadingHTTPServer] = None
         self.thread: Optional[threading.Thread] = None
 
@@ -180,8 +183,9 @@ class FakeCompanion:
                     hello: dict[str, Any] = {
                         "protocol": 1,
                         "boot": "b1",
-                        "session": 1,
+                        "session": fake.session,
                         "modelTime": 5,
+                        "linked": fake.linked,
                         "lastSeq": fake.last_seq(),
                     }
                     with fake.lock:
