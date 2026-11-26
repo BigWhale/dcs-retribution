@@ -3,7 +3,10 @@ restored mission where the tick saw them.
 
 Of a launched flight in the air at the tick, an aircraft resumes when the tick
 has it in the air, flown by the AI, and it is not counted dead; the rest go
-back to their squadron. The first to resume is the lead.
+back to their squadron. The first to resume is the lead. A tick unit's name is
+paired with its roster member by the pilot the name map records for it, so a
+restore retried before the restored mission is followed (the roster already
+shrunk, the map and tick still the old mission's) resumes the same aircraft.
 
 The flight flies on to the waypoint that ends the route leg nearest the lead.
 The legs run from the takeoff waypoint to the landing (the last waypoint when
@@ -128,9 +131,7 @@ def plan_resume(
     seen = {u.name: u for u in tick.units}
     members: list[FlightMember] = []
     units: list[ResumedUnit] = []
-    for name, member in zip(
-        record.name_map.flight_units(flight), flight.iter_members()
-    ):
+    for name, member in _named_members(game, flight):
         unit = seen.get(name)
         if unit is None or not unit.in_air or unit.player is not None:
             continue
@@ -144,6 +145,30 @@ def plan_resume(
     index = flown_to_index(flight, lead.x, lead.y, at)
     state = Resumed(flight, game.settings, index - 1, units)
     return ResumePlan(members=members, state=state)
+
+
+def _named_members(game: Game, flight: Flight) -> list[tuple[str, FlightMember]]:
+    """The flight's unit names in the name map, each with its roster member,
+    in the map's order.
+
+    A name is paired with the member flown by the pilot the map records for
+    it; a name whose member is no longer in the roster (a restore written
+    before shrank it, and its mission is not followed yet) has none. Names
+    mapped without a pilot are paired with the members without one, in
+    order.
+    """
+    aircraft = game.live.name_map.aircraft
+    no_pilot = iter([m for m in flight.iter_members() if m.pilot is None])
+    paired: list[tuple[str, FlightMember]] = []
+    for name in game.live.name_map.flight_units(flight):
+        pilot = aircraft[name].pilot
+        if pilot is None:
+            member = next(no_pilot, None)
+        else:
+            member = next((m for m in flight.iter_members() if m.pilot is pilot), None)
+        if member is not None:
+            paired.append((name, member))
+    return paired
 
 
 def flown_to_index(flight: Flight, x: float, y: float, at: datetime) -> int:

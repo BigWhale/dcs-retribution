@@ -670,3 +670,53 @@ def test_failed_resume_write_changes_nothing(
     assert flight.launched and flight.live_group_name == "LIVE 1"
     assert {s: s.untasked_aircraft for s in squadrons(own)} == untasked
     assert {s: list(s.available_pilots) for s in squadrons(own)} == pilots
+
+
+def test_second_restore_resumes_the_same_aircraft(
+    own: Game, start_miz: Path, tmp_path: Path
+) -> None:
+    """A Continue retried before the restored mission is followed (a failed
+    load, a save and reload) builds the restore again from the same tick and
+    name map, with the rosters already shrunk: the same aircraft resume, with
+    the same tick values and pilots, and the flight is not launched again."""
+    squadron = red_squadron(own)
+    flight = plan_by_hand(own, 3, squadron)
+    launch(own, flight, "LIVE 1")
+    own.live.dead.add("LIVE 1-1")
+    own.live.landed.add("LIVE 1-3")
+    pilots = list(flight.roster.iter_pilots())
+    wingman = to_racetrack(flight)["LIVE 1-2"]
+    tick_of(
+        own,
+        start_miz,
+        launched=[flight],
+        air={"LIVE 1-2": wingman, "LIVE 1-3": {"inAir": False}},
+    )
+    fuel_max = flight.unit_type.dcs_unit_type.fuel_max
+
+    def written() -> tuple[RestoreResult, tuple[float, ...]]:
+        result, mission = restore(own, tmp_path)
+        [unit] = written_group(mission, flight).units
+        return result, (
+            round(unit.position.x),
+            round(unit.position.y),
+            round(unit.alt),
+            round(unit.heading),
+            round(unit.fuel),
+        )
+
+    first, first_unit = written()
+    second, second_unit = written()
+
+    assert first_unit == (
+        round(wingman["x"]),
+        round(wingman["y"]),
+        round(wingman["alt"]),
+        round(wingman["hdg"]),
+        round(FUEL[1] * fuel_max),
+    )
+    assert second_unit == first_unit
+    assert (second.in_air, second.resumed, second.again) == (1, 1, 0)
+    assert flight.launched and flight.count == 1
+    assert list(flight.roster.iter_pilots()) == [pilots[1]]
+    assert parked(own, squadron) == squadron.owned_aircraft - 1
