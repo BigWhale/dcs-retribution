@@ -102,3 +102,20 @@ def test_turn_off_asks_while_following(
     answers[0] = QMessageBox.StandardButton.Yes
     menu.power_action.trigger()
     wait_until(lambda: (tmp_path / "off").exists())
+
+
+def test_restart_with_no_companion_says_so(
+    app: QApplication,
+    parent: QWidget,
+    tmp_path: Path,
+    serve: Callable[..., FakeCompanion],
+) -> None:
+    # The folder is here and the port answers, but no companion runs under
+    # the pid file (none written): Restart signals nothing and says so.
+    service = CompanionService(tmp_path, linked_fake(serve).address, TOKEN)
+    menu = CompanionMenu(parent, lambda: False, service)
+    menu.refresh()
+    shows(app, menu, "Companion: running (DCS linked, mission 3)")
+    assert menu.restart_action.isEnabled()
+    menu.restart_action.trigger()
+    shows(app, menu, "Companion: no companion process to restart")

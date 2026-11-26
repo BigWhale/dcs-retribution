@@ -39,6 +39,8 @@ LOG_LINES = 500
 
 class CompanionMenu(QMenu):
     status_ready = Signal(object)
+    #: A line for the status action until the next refresh.
+    notice = Signal(str)
 
     def __init__(
         self,
@@ -70,6 +72,7 @@ class CompanionMenu(QMenu):
         self._show_managed(self.service().managed)
 
         self.status_ready.connect(self._show_status)
+        self.notice.connect(lambda text: self.status_action.setText(text))
         self.aboutToShow.connect(self.refresh)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh)
@@ -125,7 +128,17 @@ class CompanionMenu(QMenu):
 
     def _restart(self) -> None:
         self.status_action.setText("Companion: restarting")
-        self._in_background(self.service().restart)
+        service = self.service()
+
+        def run() -> None:
+            if service.restart():
+                self.refresh()
+            else:
+                # Shown until the next refresh (the timer's), not overwritten
+                # at once by a status that may still read "running".
+                self.notice.emit("Companion: no companion process to restart")
+
+        threading.Thread(target=run, name="companion-control", daemon=True).start()
 
     def _power(self) -> None:
         service = self.service()
